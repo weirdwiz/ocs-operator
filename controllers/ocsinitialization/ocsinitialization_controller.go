@@ -29,6 +29,7 @@ var watchNamespace string
 const wrongNamespacedName = "Ignoring this resource. Only one should exist, and this one has the wrong name and/or namespace."
 
 const (
+	ocsDeploymentName          = "ocs-operator"
 	rookCephToolDeploymentName = "rook-ceph-tools"
 	// This name is predefined by Rook
 	rookCephOperatorConfigName = "rook-ceph-operator-config"
@@ -53,7 +54,7 @@ type OCSInitializationReconciler struct {
 	RookImage      string
 }
 
-func newToolsDeployment(namespace string, rookImage string) *appsv1.Deployment {
+func newToolsDeployment(namespace string, rookImage string, tolerations []corev1.Toleration) *appsv1.Deployment {
 
 	name := rookCephToolDeploymentName
 	var replicaOne int32 = 1
@@ -118,14 +119,7 @@ func newToolsDeployment(namespace string, rookImage string) *appsv1.Deployment {
 							},
 						},
 					},
-					Tolerations: []corev1.Toleration{
-						{
-							Key:      defaults.NodeTolerationKey,
-							Operator: corev1.TolerationOpEqual,
-							Value:    "true",
-							Effect:   corev1.TaintEffectNoSchedule,
-						},
-					},
+					Tolerations: tolerations,
 					// if hostNetwork: false, the "rbd map" command hangs, see https://github.com/rook/rook/issues/2021
 					HostNetwork: true,
 					Volumes: []corev1.Volume{
@@ -150,9 +144,17 @@ func (r *OCSInitializationReconciler) ensureToolsDeployment(initialData *ocsv1.O
 	var isFound bool
 	namespace := initialData.Namespace
 
-	toolsDeployment := newToolsDeployment(namespace, r.RookImage)
+	foundOcsDeployment := &appsv1.Deployment{}
+	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: ocsDeploymentName, Namespace: namespace}, foundOcsDeployment)
+	if err != nil {
+		r.Log.Error(err, "Failed to get Ocs Deployment resource", "OCSInitialization", klog.KRef(initialData.Namespace, initialData.Name))
+	}
+
+	foundOcsToleration := foundOcsDeployment.Spec.Template.Spec.Tolerations
+
+	toolsDeployment := newToolsDeployment(namespace, r.RookImage, foundOcsToleration)
 	foundToolsDeployment := &appsv1.Deployment{}
-	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: rookCephToolDeploymentName, Namespace: namespace}, foundToolsDeployment)
+	err = r.Client.Get(context.TODO(), types.NamespacedName{Name: rookCephToolDeploymentName, Namespace: namespace}, foundToolsDeployment)
 
 	if err == nil {
 		isFound = true
