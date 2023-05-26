@@ -98,7 +98,7 @@ gen-latest-prometheus-rules-yamls:
 	hack/gen-promethues-rules.sh
 
 verify-latest-prometheus-rules-yamls: gen-latest-prometheus-rules-yamls
-	@echo "Verifying deployment yaml changes"
+	@echo "Verifying Prometheus rules yaml changes"
 	hack/verify-latest-prometheus-rules-yamls.sh
 
 verify-latest-deploy-yaml: gen-latest-deploy-yaml
