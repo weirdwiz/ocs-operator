@@ -1,4 +1,6 @@
-name: Verify latest deployment prometheus yaml
+---
+name: ocs-operator prometheus rules
+
 on:
   push:
     paths:
