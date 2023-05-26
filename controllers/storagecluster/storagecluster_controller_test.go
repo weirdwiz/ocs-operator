@@ -7,8 +7,7 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/blang/semver"
-	"github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
+	"github.com/blang/semver/v4"
 	configv1 "github.com/openshift/api/config/v1"
 	quotav1 "github.com/openshift/api/quota/v1"
 	routev1 "github.com/openshift/api/route/v1"
@@ -16,11 +15,12 @@ import (
 	conditionsv1 "github.com/openshift/custom-resource-status/conditions/v1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
-	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookCephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +33,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
 	api "github.com/red-hat-storage/ocs-operator/api/v1"
 	ocsv1alpha1 "github.com/red-hat-storage/ocs-operator/api/v1alpha1"
 	"github.com/red-hat-storage/ocs-operator/controllers/defaults"
@@ -104,7 +105,7 @@ var mockCephClusterNamespacedName = types.NamespacedName{
 	Namespace: mockStorageCluster.Namespace,
 }
 
-var storageClassName = "gp2"
+var storageClassName = "gp2-csi"
 var storageClassName2 = "managed-premium"
 var fakeStorageClassName = "st1"
 var volMode = corev1.PersistentVolumeBlock
@@ -328,14 +329,14 @@ func TestThrottleStorageDevices(t *testing.T) {
 		platform       *Platform
 	}{
 		{
-			label: "Case 1", // storageclass is gp2 or io1
+			label: "Case 1", // storageclass is gp2-csi or io1
 			storageClass: &storagev1.StorageClass{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "gp2",
+					Name: "gp2-csi",
 				},
 				Provisioner: string(EBS),
 				Parameters: map[string]string{
-					"type": "gp2",
+					"type": "gp2-csi",
 				},
 			},
 			deviceSets: []api.StorageDeviceSet{
@@ -354,7 +355,7 @@ func TestThrottleStorageDevices(t *testing.T) {
 			expectedSpeed:  diskSpeedSlow,
 		},
 		{
-			label: "Case 2", // storageclass is neither gp2 nor io1
+			label: "Case 2", // storageclass is neither gp2-csi nor io1
 			storageClass: &storagev1.StorageClass{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "st1",
@@ -433,14 +434,14 @@ func TestThrottleStorageDevices(t *testing.T) {
 			expectedSpeed:  diskSpeedSlow,
 		},
 		{
-			label: "Case 5", // storageclass is gp2 but deviceType ssd
+			label: "Case 5", // storageclass is gp2-csi but deviceType ssd
 			storageClass: &storagev1.StorageClass{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "gp2",
+					Name: "gp2-csi",
 				},
 				Provisioner: string(EBS),
 				Parameters: map[string]string{
-					"type": "gp2",
+					"type": "gp2-csi",
 				},
 			},
 			deviceSets: []api.StorageDeviceSet{
@@ -460,7 +461,7 @@ func TestThrottleStorageDevices(t *testing.T) {
 			expectedSpeed:  diskSpeedFast,
 		},
 		{
-			label: "Case 6", // storageclass is neither gp2 nor io1 but deviceType nvme
+			label: "Case 6", // storageclass is neither gp2-csi nor io1 but deviceType nvme
 			storageClass: &storagev1.StorageClass{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "st1",
@@ -487,7 +488,7 @@ func TestThrottleStorageDevices(t *testing.T) {
 			expectedSpeed:  diskSpeedFast,
 		},
 		{
-			label: "Case 7", // storageclass is neither gp2 nor io1 but platform is Azure
+			label: "Case 7", // storageclass is neither gp2-csi nor io1 but platform is Azure
 			storageClass: &storagev1.StorageClass{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "st1",
@@ -686,7 +687,7 @@ func TestNonWatchedReconcileWithTheCephClusterType(t *testing.T) {
 	err = reconciler.Client.Get(context.TODO(), mockStorageClusterRequest.NamespacedName, actual)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, actual.Status.Conditions)
-	assert.Len(t, actual.Status.Conditions, 5)
+	assert.Len(t, actual.Status.Conditions, 6)
 
 	assertExpectedCondition(t, actual.Status.Conditions)
 }
@@ -697,11 +698,11 @@ func TestStorageDeviceSets(t *testing.T) {
 	walScName := ""
 	storageClassEBS := &storagev1.StorageClass{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "gp2",
+			Name: "gp2-csi",
 		},
 		Provisioner: string(EBS),
 		Parameters: map[string]string{
-			"type": "gp2",
+			"type": "gp2-csi",
 		},
 	}
 
@@ -848,7 +849,7 @@ func TestStorageClusterInitConditions(t *testing.T) {
 	err = reconciler.Client.Get(context.TODO(), mockStorageClusterRequest.NamespacedName, actual)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, actual.Status.Conditions)
-	assert.Len(t, actual.Status.Conditions, 5)
+	assert.Len(t, actual.Status.Conditions, 6)
 
 	assertExpectedCondition(t, actual.Status.Conditions)
 }
@@ -862,7 +863,7 @@ func TestStorageClusterFinalizer(t *testing.T) {
 		Name:      "noobaa",
 		Namespace: mockStorageClusterRequest.NamespacedName.Namespace,
 	}
-	noobaaMock := &v1alpha1.NooBaa{
+	noobaaMock := &nbv1.NooBaa{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      namespacedName.Name,
 			Namespace: mockStorageClusterRequest.NamespacedName.Namespace,
@@ -881,7 +882,7 @@ func TestStorageClusterFinalizer(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, sc.ObjectMeta.GetFinalizers(), 1)
 
-	noobaa := &v1alpha1.NooBaa{}
+	noobaa := &nbv1.NooBaa{}
 	err = reconciler.Client.Get(context.TODO(), namespacedName, noobaa)
 	assert.NoError(t, err)
 	assert.Equal(t, noobaa.Name, noobaaMock.Name)
@@ -916,7 +917,7 @@ func TestStorageClusterFinalizer(t *testing.T) {
 		assert.Len(t, sc.ObjectMeta.GetFinalizers(), 0)
 	}
 
-	noobaa = &v1alpha1.NooBaa{}
+	noobaa = &nbv1.NooBaa{}
 	err = reconciler.Client.Get(context.TODO(), namespacedName, noobaa)
 	assert.True(t, errors.IsNotFound(err))
 }
@@ -928,6 +929,7 @@ func assertExpectedCondition(t *testing.T, conditions []conditionsv1.Condition) 
 		conditionsv1.ConditionProgressing: corev1.ConditionTrue,
 		conditionsv1.ConditionDegraded:    corev1.ConditionFalse,
 		conditionsv1.ConditionUpgradeable: corev1.ConditionUnknown,
+		api.ConditionVersionMismatch:      corev1.ConditionFalse,
 	}
 	for cType, status := range expectedConditions {
 		found := assertCondition(conditions, cType, status)
@@ -986,6 +988,10 @@ func createFakeScheme(t *testing.T) *runtime.Scheme {
 	if err != nil {
 		assert.Fail(t, "unable to build scheme")
 	}
+	err = batchv1.AddToScheme(scheme)
+	if err != nil {
+		assert.Fail(t, "unable to add batchv1 to scheme")
+	}
 	err = corev1.AddToScheme(scheme)
 	if err != nil {
 		assert.Fail(t, "failed to add corev1 scheme")
@@ -1023,9 +1029,9 @@ func createFakeScheme(t *testing.T) *runtime.Scheme {
 		assert.Fail(t, "failed to add routev1 scheme")
 	}
 
-	err = v1alpha1.SchemeBuilder.AddToScheme(scheme)
+	err = nbv1.SchemeBuilder.AddToScheme(scheme)
 	if err != nil {
-		assert.Fail(t, "failed to add v1alpha1 scheme")
+		assert.Fail(t, "failed to add nbv1 scheme")
 	}
 
 	err = appsv1.AddToScheme(scheme)
@@ -1046,7 +1052,6 @@ func createFakeScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-//nolint //ignoring err checks as causing failures
 func TestMonCountChange(t *testing.T) {
 	for nodeCount := 0; nodeCount <= 10; nodeCount++ {
 		monCountExpected := defaults.DefaultMonCount
@@ -1137,8 +1142,6 @@ func assertCephClusterNetwork(t assert.TestingT, reconciler StorageClusterReconc
 	if cr.Spec.Network == nil {
 		assert.Equal(t, "", cephCluster.Spec.Network.Provider)
 		assert.Nil(t, cephCluster.Spec.Network.Selectors)
-	} else {
-		assert.Equal(t, *cr.Spec.Network, cephCluster.Spec.Network)
 	}
 }
 

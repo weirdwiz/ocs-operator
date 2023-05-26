@@ -11,10 +11,11 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
+FUSION?=false
 KUSTOMIZE_VERSION=v4.5.2
-CONTROLLER_GEN_VERSION=v0.8.0
+CONTROLLER_GEN_VERSION=v0.9.2
 
-all: ocs-operator ocs-registry ocs-must-gather
+all: ocs-operator ocs-registry
 
 .PHONY: \
 	build \
@@ -23,7 +24,6 @@ all: ocs-operator ocs-registry ocs-must-gather
 	build-container \
 	clean \
 	ocs-operator \
-	ocs-must-gather \
 	operator-bundle \
 	verify-operator-bundle \
 	operator-index \
@@ -50,7 +50,7 @@ all: ocs-operator ocs-registry ocs-must-gather
 
 deps-update:
 	@echo "Running deps-update"
-	go mod tidy -compat=1.17 && go mod vendor
+	go mod tidy && go mod vendor
 
 operator-sdk:
 	@echo "Ensuring operator-sdk"
@@ -77,10 +77,6 @@ ocs-metrics-exporter: build
 	@echo "Building the ocs-metrics-exporter image"
 	hack/build-metrics-exporter.sh
 
-ocs-must-gather:
-	@echo "Building the ocs-must-gather image"
-	hack/build-must-gather.sh
-
 source-manifests: operator-sdk manifests kustomize
 	@echo "Sourcing CSV and CRD manifests from component-level operators"
 	hack/source-manifests.sh
@@ -101,6 +97,10 @@ gen-latest-prometheus-rules-yamls:
 	@echo "Generating latest Prometheus rules yamls"
 	hack/gen-promethues-rules.sh
 
+verify-latest-prometheus-rules-yamls: gen-latest-prometheus-rules-yamls
+	@echo "Verifying Prometheus rules yaml changes"
+	hack/verify-latest-prometheus-rules-yamls.sh
+
 verify-latest-deploy-yaml: gen-latest-deploy-yaml
 	@echo "Verifying deployment yaml changes"
 	hack/verify-latest-deploy-yaml.sh
@@ -113,17 +113,23 @@ verify-latest-csv: gen-latest-csv
 	@echo "Verifying latest CSV"
 	hack/verify-latest-csv.sh
 
-verify-operator-bundle:
+verify-operator-bundle: operator-sdk
 	@echo "Verifying operator bundle"
 	hack/verify-operator-bundle.sh
 
 operator-bundle:
-	@echo "Building ocs-operator-bundle image"
+	@echo "FUSION=$(FUSION)"
 	hack/build-operator-bundle.sh
 
 operator-index:
-	@echo "Building ocs-operator-index image"
+	@echo "FUSION=$(FUSION)"
+	@echo "Building ocs index image in sqlite db based format"
 	hack/build-operator-index.sh
+
+operator-catalog:
+	@echo "FUSION=$(FUSION)"
+	@echo "Building ocs catalog image in file based catalog format"
+	hack/build-operator-catalog.sh
 
 ocs-registry:
 	@echo "Building ocs-registry image in appregistry format"
@@ -161,11 +167,15 @@ golangci-lint:
 	@echo "Running golangci-lint run"
 	hack/golangci_lint.sh
 
+lint: ## Run golangci-lint inside a container
+	source hack/common.sh; source hack/docker-common.sh; \
+	$${IMAGE_BUILD_CMD} run --rm -v $${PROJECT_DIR}:/app:Z -w /app $${GO_LINT_IMG} golangci-lint run ./...
+
 # ignoring the functest dir since it requires an active cluster
 # use 'make functest' to run just the functional tests
 unit-test:
 	@echo "Executing unit tests"
-	go test -v -cover `go list ./... | grep -v "functest"`
+	hack/unit-test.sh
 
 ocs-operator-ci: shellcheck-test golangci-lint unit-test verify-deps verify-generated verify-latest-deploy-yaml
 
@@ -181,7 +191,7 @@ generate: controller-gen
 # Generate manifests e.g. CRD, RBAC etc.
 manifests: controller-gen
 	@echo Updating generated manifests
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd paths=./api/... webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:generateEmbeddedObjectMeta=true paths=./api/... webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
 verify-deps: deps-update
 	@echo "Verifying dependency files"

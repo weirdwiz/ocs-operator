@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 	"github.com/go-logr/logr"
 	conditionsv1 "github.com/openshift/custom-resource-status/conditions/v1"
 	"github.com/operator-framework/operator-lib/conditions"
@@ -114,7 +114,7 @@ var validTopologyLabelKeys = []string{
 // +kubebuilder:rbac:groups=core,resources=pods;services;endpoints;persistentvolumeclaims;events;configmaps;secrets;nodes,verbs=*
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=deployments;daemonsets;replicasets;statefulsets,verbs=*
-// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors;prometheusrules,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors;prometheusrules,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots;volumesnapshotclasses,verbs=*
 // +kubebuilder:rbac:groups=template.openshift.io,resources=templates,verbs=*
 // +kubebuilder:rbac:groups=config.openshift.io,resources=infrastructures;networks,verbs=get;list;watch
@@ -125,7 +125,9 @@ var validTopologyLabelKeys = []string{
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;create;update
 // +kubebuilder:rbac:groups=operators.coreos.com,resources=operatorconditions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=quota.openshift.io,resources=clusterresourcequotas,verbs=*
-// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;create;update;watch
+// +kubebuilder:rbac:groups=batch,resources=cronjobs;jobs,verbs=get;list;create;update;watch;delete
+// +kubebuilder:rbac:groups=cluster.open-cluster-management.io,resources=clusterclaims,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=operators.coreos.com,resources=clusterserviceversions,verbs=get;list;watch
 
 // Reconcile reads that state of the cluster for a StorageCluster object and makes changes based on the state read
 // and what is in the StorageCluster.Spec
@@ -204,18 +206,25 @@ func (r *StorageClusterReconciler) initializeImagesStatus(sc *ocsv1.StorageClust
 	images.NooBaaDB.DesiredImage = r.images.NooBaaDB
 }
 
-// validateStorageClusterSpec must be called before reconciling. Any syntactic and sematic errors in the CR must be caught here.
+// validateStorageClusterSpec must be called before reconciling. Any syntactic and semantic errors in the CR must be caught here.
 func (r *StorageClusterReconciler) validateStorageClusterSpec(instance *ocsv1.StorageCluster, request reconcile.Request) error {
 	if err := versionCheck(instance, r.Log); err != nil {
 		r.Log.Error(err, "Failed to validate StorageCluster version.", "StorageCluster", klog.KRef(instance.Namespace, instance.Name))
 		r.recorder.ReportIfNotPresent(instance, corev1.EventTypeWarning, statusutil.EventReasonValidationFailed, err.Error())
 		instance.Status.Phase = statusutil.PhaseError
+		reason := statusutil.EventReasonValidationFailed
+		message := err.Error()
+		statusutil.SetVersionMismatchCondition(&instance.Status.Conditions, corev1.ConditionTrue, reason, message)
 		if updateErr := r.Client.Status().Update(context.TODO(), instance); updateErr != nil {
 			r.Log.Error(updateErr, "Failed to update StorageCluster.", "StorageCluster", klog.KRef(instance.Namespace, instance.Name))
 			return updateErr
 		}
 		return err
 	}
+
+	reason := statusutil.VersionValidReason
+	message := "Version check successful"
+	statusutil.SetVersionMismatchCondition(&instance.Status.Conditions, corev1.ConditionFalse, reason, message)
 
 	if !instance.Spec.ExternalStorage.Enable {
 		if err := r.validateStorageDeviceSets(instance); err != nil {
@@ -243,23 +252,6 @@ func (r *StorageClusterReconciler) validateStorageClusterSpec(instance *ocsv1.St
 
 	if err := validateOverprovisionControlSpec(instance, r.Log); err != nil {
 		r.Log.Error(err, "Failed to validate OverprovisionControlSpec.", "StorageCluster", klog.KRef(instance.Namespace, instance.Name))
-		r.recorder.ReportIfNotPresent(instance, corev1.EventTypeWarning, statusutil.EventReasonValidationFailed, err.Error())
-		instance.Status.Phase = statusutil.PhaseError
-		if updateErr := r.Client.Status().Update(context.TODO(), instance); updateErr != nil {
-			r.Log.Error(updateErr, "Could not update StorageCluster.", "StorageCluster", klog.KRef(instance.Namespace, instance.Name))
-			return updateErr
-		}
-		return err
-	}
-
-	if IsOCSConsumerMode(instance) &&
-		(instance.Spec.ExternalStorage.StorageProviderEndpoint == "" ||
-			instance.Spec.ExternalStorage.OnboardingTicket == "" ||
-			instance.Spec.ExternalStorage.RequestedCapacity == nil) {
-
-		err := fmt.Errorf("spec.externalStorage.storageProviderEndpoint or spec.externalStorage.onboardingTicket or spec.externalStorage.requestedCapacity" +
-			" can not be empty when spec.externalStorage.storageProviderKind is set to ocs")
-		r.Log.Error(err, "Failed to validate Spec for ExternalStorage", "StorageCluster", klog.KRef(instance.Namespace, instance.Name))
 		r.recorder.ReportIfNotPresent(instance, corev1.EventTypeWarning, statusutil.EventReasonValidationFailed, err.Error())
 		instance.Status.Phase = statusutil.PhaseError
 		if updateErr := r.Client.Status().Update(context.TODO(), instance); updateErr != nil {
@@ -312,7 +304,7 @@ func (r *StorageClusterReconciler) reconcilePhases(
 	}
 
 	// Add conditions if there are none
-	if instance.Status.Conditions == nil {
+	if len(instance.Status.Conditions) == 1 && instance.Status.Conditions[0].Type == ocsv1.ConditionVersionMismatch {
 		reason := ocsv1.ReconcileInit
 		message := "Initializing StorageCluster"
 		statusutil.SetProgressingCondition(&instance.Status.Conditions, reason, message)
@@ -358,7 +350,7 @@ func (r *StorageClusterReconciler) reconcilePhases(
 			}
 		}
 		r.Log.Info("StorageCluster is terminated, skipping reconciliation.", "StorageCluster", klog.KRef(instance.Namespace, instance.Name))
-		returnErr := r.SetOperatorConditions("Skipping StorageCluster reconcilation", "Terminated", metav1.ConditionTrue, nil)
+		returnErr := r.SetOperatorConditions("Skipping StorageCluster reconciliation", "Terminated", metav1.ConditionTrue, nil)
 		return reconcile.Result{}, returnErr
 	}
 
@@ -374,6 +366,7 @@ func (r *StorageClusterReconciler) reconcilePhases(
 			// preserve list order
 			objs = []resourceManager{
 				&ocsProviderServer{},
+				&backingStorageClasses{},
 				&ocsTopologyMap{},
 				&ocsStorageQuota{},
 				&ocsCephConfig{},
@@ -390,6 +383,7 @@ func (r *StorageClusterReconciler) reconcilePhases(
 				&ocsSnapshotClass{},
 				&ocsJobTemplates{},
 				&ocsCephRbdMirrors{},
+				&ocsClusterClaim{},
 			}
 		} else {
 			// noobaa-only ensure functions
@@ -407,6 +401,7 @@ func (r *StorageClusterReconciler) reconcilePhases(
 			&ocsCephCluster{},
 			&ocsSnapshotClass{},
 			&ocsNoobaaSystem{},
+			&ocsClusterClaim{},
 		}
 	}
 
@@ -434,6 +429,12 @@ func (r *StorageClusterReconciler) reconcilePhases(
 			statusutil.SetErrorCondition(&instance.Status.Conditions, reason, message)
 
 			if instance.Status.Phase != statusutil.PhaseOnboarding {
+				// if the error was due to skipped storage classes
+				// instead of error phase we will set it to progressing
+				if strings.Contains(returnErr.Error(), storageClassSkippedError) {
+					instance.Status.Phase = statusutil.PhaseProgressing
+					return reconcile.Result{Requeue: true}, nil
+				}
 				instance.Status.Phase = statusutil.PhaseError
 			}
 
@@ -450,6 +451,10 @@ func (r *StorageClusterReconciler) reconcilePhases(
 		reason := ocsv1.ReconcileCompleted
 		message := ocsv1.ReconcileCompletedMessage
 		statusutil.SetCompleteCondition(&instance.Status.Conditions, reason, message)
+
+		if instance.Spec.ExternalStorage.Enable {
+			statusutil.RemoveExternalCephClusterNegativeConditions(&instance.Status.Conditions)
+		}
 
 		// If no operator whose conditions we are watching reports an error, then it is safe
 		// to set upgradeable to true.
@@ -521,14 +526,37 @@ func (r *StorageClusterReconciler) reconcilePhases(
 		}
 	}
 
+	// For security of encrypted messagges, When both encryption and compression are enabled,
+	// compression setting will be ignored and message will not be compressed.
+	// Refer https://docs.ceph.com/en/quincy/rados/configuration/msgr2/#confval-ms_compress_secure
+	networkSpec := instance.Spec.Network
+	if networkSpec != nil && networkSpec.Connections != nil &&
+		networkSpec.Connections.Encryption != nil && networkSpec.Connections.Encryption.Enabled &&
+		networkSpec.Connections.Compression != nil && networkSpec.Connections.Compression.Enabled {
+		r.Log.Info("Both in-transit encryption & compression are enabled. " +
+			"To protect security of encrypted messages ceph will ignore compression")
+		r.recorder.ReportIfNotPresent(instance, corev1.EventTypeWarning, "EncryptionAndCompressionEnabled",
+			"Both in-transit encryption & compression are enabled. "+
+				"To protect security of encrypted messages ceph will ignore compression")
+
+	}
+
+	// Ensure that verbose logging is enabled when RBD mirroring is enabled
+	// TODO: This is a temporary arrangement, this is to be removed when RDR goes to GA
+	result, err := r.ensureRbdMirrorDebugLogging(instance)
+	if !result.IsZero() || err != nil {
+		r.Log.Error(err, "Failed to ensure RBD mirror debug logging.")
+		return result, err
+	}
+
 	return reconcile.Result{}, nil
 }
 
-// versionCheck populates the `.Spec.Version` field
+// versionCheck populates the `.Status.Version` field
 func versionCheck(sc *ocsv1.StorageCluster, reqLogger logr.Logger) error {
 	if sc.Status.Version == "" {
 		sc.Status.Version = version.Version
-	} else if sc.Status.Version != version.Version { // check anything else only if the versions mis-match
+	} else if sc.Status.Version != version.Version { // check anything else only if the versions mismatch
 		storClustSemV1, err := semver.Make(sc.Status.Version)
 		if err != nil {
 			reqLogger.Error(err, "Error while parsing Storage Cluster version")

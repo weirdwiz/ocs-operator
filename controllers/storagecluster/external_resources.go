@@ -14,18 +14,13 @@ import (
 
 	"github.com/go-logr/logr"
 	ocsv1 "github.com/red-hat-storage/ocs-operator/api/v1"
-	ocsv1alpha1 "github.com/red-hat-storage/ocs-operator/api/v1alpha1"
-	statusutil "github.com/red-hat-storage/ocs-operator/controllers/util"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -44,9 +39,10 @@ const (
 	rookEnableCephFSCSIKey     = "ROOK_CSI_ENABLE_CEPHFS"
 )
 
-const (
-	// defaultStorageClassClaimLabel is added to all default storage class claims
-	defaultStorageClassClaimLabel = "storageclassclaim.ocs.openshift.io/default"
+var (
+	// externalOCSResources will hold the ExternalResources for storageclusters
+	// ExternalResources can be accessible using the UID of an storagecluster
+	externalOCSResources = map[types.UID][]ExternalResource{}
 )
 
 // ExternalResource contains a list of External Cluster Resources
@@ -149,6 +145,20 @@ func (r *StorageClusterReconciler) retrieveSecret(secretName string, instance *o
 	return found, err
 }
 
+// deleteSecret function delete the secret object with the specified name
+func (r *StorageClusterReconciler) deleteSecret(secretName string, instance *ocsv1.StorageCluster) error {
+	found, err := r.retrieveSecret(externalClusterDetailsSecret, instance)
+	if errors.IsNotFound(err) {
+		r.Log.Info("External rhcs mode secret already deleted.")
+		return nil
+	}
+	if err != nil {
+		r.Log.Error(err, "Error while retrieving external rhcs mode secret.")
+		return err
+	}
+	return r.Client.Delete(context.TODO(), found)
+}
+
 // retrieveExternalSecretData function retrieves the external secret and returns the data it contains
 func (r *StorageClusterReconciler) retrieveExternalSecretData(
 	instance *ocsv1.StorageCluster) ([]ExternalResource, error) {
@@ -179,7 +189,7 @@ func newExternalGatewaySpec(rgwEndpoint string, reqLogger logr.Logger, tlsEnable
 		reqLogger.Error(err, "Host IP should not be empty in rgw endpoint")
 		return nil, err
 	}
-	gateWay.ExternalRgwEndpoints = []corev1.EndpointAddress{{IP: hostIP}}
+	gateWay.ExternalRgwEndpoints = []cephv1.EndpointAddress{{IP: hostIP}}
 	var portInt64 int64
 	if portInt64, err = strconv.ParseInt(portStr, 10, 32); err != nil {
 		reqLogger.Error(err,
@@ -218,21 +228,13 @@ func (r *StorageClusterReconciler) newExternalCephObjectStoreInstances(
 	if err != nil {
 		return nil, err
 	}
-	// enable bucket healthcheck
-	healthCheck := cephv1.BucketHealthCheckSpec{
-		Bucket: cephv1.HealthCheckSpec{
-			Disabled: false,
-			Interval: &metav1.Duration{Duration: time.Minute},
-		},
-	}
 	retObj := &cephv1.CephObjectStore{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      generateNameForCephObjectStore(initData),
 			Namespace: initData.Namespace,
 		},
 		Spec: cephv1.ObjectStoreSpec{
-			Gateway:     *gatewaySpec,
-			HealthCheck: healthCheck,
+			Gateway: *gatewaySpec,
 		},
 	}
 	retArrObj := []*cephv1.CephObjectStore{
@@ -245,62 +247,19 @@ func (r *StorageClusterReconciler) newExternalCephObjectStoreInstances(
 // being created
 func (obj *ocsExternalResources) ensureCreated(r *StorageClusterReconciler, instance *ocsv1.StorageCluster) (reconcile.Result, error) {
 
-	if IsOCSConsumerMode(instance) {
+	// rhcs external mode
+	data, err := r.retrieveExternalSecretData(instance)
+	if err != nil {
+		r.Log.Error(err, "Failed to retrieve external secret resources.")
+		return reconcile.Result{}, err
+	}
+	externalOCSResources[instance.UID] = data
 
-		externalClusterClient, err := r.newExternalClusterClient(instance)
-		if err != nil {
-			r.Log.Error(err, "Failed to connect to the provider cluster")
-			return reconcile.Result{}, fmt.Errorf("%s: %s", err.Error(), "Failed to connect to the provider cluster")
-		}
-		defer externalClusterClient.Close()
-
-		if instance.Status.ExternalStorage.ConsumerID == "" {
-			return r.onboardConsumer(instance, externalClusterClient)
-		} else if instance.Status.Phase == statusutil.PhaseOnboarding {
-			return r.acknowledgeOnboarding(instance, externalClusterClient)
-		} else if !instance.Spec.ExternalStorage.RequestedCapacity.Equal(instance.Status.ExternalStorage.GrantedCapacity) {
-			res, err := r.updateConsumerCapacity(instance, externalClusterClient)
-			if err != nil || !res.IsZero() {
-				return res, err
-			}
-		}
-
-		if res, err := r.reconcileConsumerStatusReporterJob(instance, externalClusterClient); err != nil {
-			return res, err
-		}
-
-		if externalOCSResources[instance.UID] == nil {
-			externalConfig, res, err := r.getExternalConfigFromProvider(instance, externalClusterClient)
-			if err != nil || !res.IsZero() {
-				return res, err
-			}
-			externalOCSResources[instance.UID] = externalConfig
-		}
-
-		externalClusterClient.Close()
-
-		if err := r.createClaimsFor410DefaultStorageClasses(instance); err != nil {
-			return reconcile.Result{}, err
-		}
-		if err := r.delete410SnapshotClasses(instance); err != nil {
-			return reconcile.Result{}, err
-		}
-
-	} else {
-		// rhcs external mode
-		data, err := r.retrieveExternalSecretData(instance)
-		if err != nil {
-			r.Log.Error(err, "Failed to retrieve external secret resources.")
-			return reconcile.Result{}, err
-		}
-		externalOCSResources[instance.UID] = data
-
-		if r.sameExternalSecretData(instance) {
-			return reconcile.Result{}, nil
-		}
+	if r.sameExternalSecretData(instance) {
+		return reconcile.Result{}, nil
 	}
 
-	err := r.createExternalStorageClusterResources(instance)
+	err = r.createExternalStorageClusterResources(instance)
 	if err != nil {
 		r.Log.Error(err, "Could not create ExternalStorageClusterResource.", "StorageCluster", klog.KRef(instance.Namespace, instance.Name))
 		return reconcile.Result{}, err
@@ -308,200 +267,9 @@ func (obj *ocsExternalResources) ensureCreated(r *StorageClusterReconciler, inst
 	return reconcile.Result{}, nil
 }
 
-func (r *StorageClusterReconciler) createClaimsFor410DefaultStorageClasses(instance *ocsv1.StorageCluster) error {
-
-	cephFsStorageClass := &storagev1.StorageClass{}
-	cephFsStorageClassName := generateNameForCephFilesystemSC(instance)
-	if err := r.Client.Get(r.ctx, types.NamespacedName{Name: cephFsStorageClassName}, cephFsStorageClass); err == nil {
-		err = r.createDefaultStorageClassClaimsForCephFS(instance)
-		if err != nil {
-			return fmt.Errorf("failed to created sharedfilesystem storageClassClaim %s. %v", cephFsStorageClassName, err)
-		}
-	}
-
-	cephRbdStorageClass := &storagev1.StorageClass{}
-	cephRbdStorageClassName := generateNameForCephBlockPoolSC(instance)
-	if err := r.Client.Get(r.ctx, types.NamespacedName{Name: cephRbdStorageClassName}, cephRbdStorageClass); err == nil {
-		err := r.createDefaultStorageClassClaimsForRBD(instance)
-		if err != nil {
-			return fmt.Errorf("failed to created blockpool storageClassClaim %s. %v", cephRbdStorageClassName, err)
-		}
-	}
-
-	return nil
-}
-
-func (r *StorageClusterReconciler) delete410SnapshotClasses(instance *ocsv1.StorageCluster) error {
-	snapshotClassConfiguration := newSnapshotClassConfigurations(instance)
-	for i := range snapshotClassConfiguration {
-		sc := snapshotClassConfiguration[i].snapshotClass
-
-		if err := r.Client.Delete(r.ctx, sc); err != nil && !errors.IsNotFound(err) {
-			r.Log.Error(err, "error deleting VolumeSnapshotClass.", "VolumeSnapshotClass", sc.Name)
-		}
-	}
-
-	return nil
-}
-
 // ensureDeleted is dummy func for the ocsExternalResources
 func (obj *ocsExternalResources) ensureDeleted(r *StorageClusterReconciler, instance *ocsv1.StorageCluster) (reconcile.Result, error) {
-
-	if IsOCSConsumerMode(instance) {
-
-		err := r.deleteDefaultStorageClassClaims(instance)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-
-		// skip offboarding if consumer is not onboarded
-		if instance.Status.ExternalStorage.ConsumerID == "" {
-			r.Log.Info("Consumer is not onboarded. Skipping the offboarding request.")
-			return reconcile.Result{}, nil
-		}
-
-		externalClusterClient, err := r.newExternalClusterClient(instance)
-		if err != nil {
-			r.Log.Error(err, "Failed to connect to the provider cluster")
-			return reconcile.Result{}, fmt.Errorf("%s: %s", err.Error(), "Failed to connect to the provider cluster")
-		}
-		defer externalClusterClient.Close()
-
-		if res, err := r.offboardConsumer(instance, externalClusterClient); err != nil {
-			return res, err
-		}
-
-		cephFilesystemSubVolumeGroupList := &cephv1.CephFilesystemSubVolumeGroupList{}
-
-		if err = r.Client.List(context.TODO(), cephFilesystemSubVolumeGroupList, client.InNamespace(instance.Namespace)); err != nil {
-			return reconcile.Result{}, fmt.Errorf("uninstall: Failed to fetch cephFilesystemSubVolumeGroupList. %v", err)
-		}
-
-		for _, cephFilesystemSubVolumeGroup := range cephFilesystemSubVolumeGroupList.Items {
-			if err = r.Client.Delete(context.TODO(), &cephFilesystemSubVolumeGroup); err != nil && !errors.IsNotFound(err) {
-				r.Log.Error(
-					err,
-					"Uninstall: Failed to delete CephFilesystemSubVolumeGroup.",
-					"CephFilesystemSubVolumeGroup",
-					klog.KRef(cephFilesystemSubVolumeGroup.Namespace, cephFilesystemSubVolumeGroup.Name),
-				)
-				return reconcile.Result{}, fmt.Errorf("uninstall: Failed to delete CephFilesystemSubVolumeGroup %q. %v", cephFilesystemSubVolumeGroup.Name, err)
-			}
-		}
-	}
-
 	return reconcile.Result{}, nil
-}
-
-func (r *StorageClusterReconciler) createDefaultStorageClassClaimsForRBD(instance *ocsv1.StorageCluster) error {
-	storageClassClaimBlock := &ocsv1alpha1.StorageClassClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      generateNameForCephBlockPoolSC(instance),
-			Namespace: instance.Namespace,
-			Labels: map[string]string{
-				defaultStorageClassClaimLabel: "true",
-			},
-		},
-		Spec: ocsv1alpha1.StorageClassClaimSpec{
-			Type: "blockpool",
-		},
-	}
-
-	if err := r.createAndOwnStorageClassClaim(instance, storageClassClaimBlock); err != nil {
-		return fmt.Errorf("failed to create default blockpool storageClassClaim %s. %v", storageClassClaimBlock.Name, err)
-	}
-	return nil
-}
-
-func (r *StorageClusterReconciler) createDefaultStorageClassClaimsForCephFS(instance *ocsv1.StorageCluster) error {
-	storageClassClaimFile := &ocsv1alpha1.StorageClassClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      generateNameForCephFilesystemSC(instance),
-			Namespace: instance.Namespace,
-			Labels: map[string]string{
-				defaultStorageClassClaimLabel: "true",
-			},
-		},
-		Spec: ocsv1alpha1.StorageClassClaimSpec{
-			Type: "sharedfilesystem",
-		},
-	}
-
-	if err := r.createAndOwnStorageClassClaim(instance, storageClassClaimFile); err != nil {
-		return fmt.Errorf("failed to create default blockpool storageClassClaim %s. %v", storageClassClaimFile.Name, err)
-	}
-
-	return nil
-}
-
-func (r *StorageClusterReconciler) createAndOwnStorageClassClaim(
-	instance *ocsv1.StorageCluster, claim *ocsv1alpha1.StorageClassClaim) error {
-
-	err := controllerutil.SetOwnerReference(instance, claim, r.Client.Scheme())
-	if err != nil {
-		return err
-	}
-
-	err = r.Client.Create(context.TODO(), claim)
-	if err != nil && !errors.IsAlreadyExists(err) {
-		return err
-	}
-	return nil
-}
-
-func (r *StorageClusterReconciler) deleteDefaultStorageClassClaims(instance *ocsv1.StorageCluster) error {
-
-	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
-		MatchExpressions: []metav1.LabelSelectorRequirement{
-			{
-				Key:      defaultStorageClassClaimLabel,
-				Operator: metav1.LabelSelectorOpExists,
-			},
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	storageClassClaims := &ocsv1alpha1.StorageClassClaimList{}
-	err = r.Client.List(context.TODO(), storageClassClaims, &client.ListOptions{LabelSelector: selector})
-	if err != nil {
-		return err
-	}
-
-	for i := range storageClassClaims.Items {
-		storageClassClaim := &storageClassClaims.Items[i]
-
-		err = r.Client.Delete(context.TODO(), storageClassClaim)
-		if err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (r *StorageClusterReconciler) verifyNoStorageClassClaimsExist(instance *ocsv1.StorageCluster) error {
-
-	storageClassClaims := &ocsv1alpha1.StorageClassClaimList{}
-	err := r.Client.List(context.TODO(), storageClassClaims)
-	if err != nil {
-		return err
-	}
-
-	for i := range storageClassClaims.Items {
-		storageClassClaim := &storageClassClaims.Items[i]
-
-		if _, ok := storageClassClaim.Labels[defaultStorageClassClaimLabel]; !ok {
-			err = fmt.Errorf("Failed to cleanup resources. storageClassClaims are present." +
-				"Delete all storageClassClaims for the cleanup to proceed")
-			r.recorder.ReportIfNotPresent(instance, corev1.EventTypeWarning, "Cleanup", err.Error())
-			r.Log.Error(err, "Waiting for all storageClassClaims to be deleted.")
-			return err
-		}
-	}
-
-	return nil
 }
 
 // createExternalStorageClusterResources creates external cluster resources
@@ -615,11 +383,7 @@ func (r *StorageClusterReconciler) createExternalStorageClusterResources(instanc
 		r.Log.Error(err, "Failed to create needed StorageClasses.")
 		return err
 	}
-	// We do not want to disable CephFS csi driver in consumer mode since
-	// CephFS storageclass is available by default.
-	if IsOCSConsumerMode(instance) {
-		enableRookCSICephFS = true
-	}
+
 	if err = r.setRookCSICephFS(enableRookCSICephFS, instance); err != nil {
 		r.Log.Error(err, "Failed to set RookEnableCephFSCSIKey to EnableRookCSICephFS.", "RookEnableCephFSCSIKey", rookEnableCephFSCSIKey, "EnableRookCSICephFS", enableRookCSICephFS)
 		return err
@@ -692,13 +456,13 @@ func (r *StorageClusterReconciler) createExternalStorageClusterSecret(sec *corev
 	err := r.Client.Get(context.TODO(), objectKey, found)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			r.Log.Info("Creating External StorageCluster Secret.", "Secret", klog.KRef(sec.Name, objectKey.Namespace))
+			r.Log.Info("Creating External StorageCluster Secret.", "Secret", klog.KRef(objectKey.Namespace, sec.Name))
 			err = r.Client.Create(context.TODO(), sec)
 			if err != nil {
-				r.Log.Error(err, "Creation of External StorageCluster Secret failed.", "Secret", klog.KRef(sec.Name, objectKey.Namespace))
+				r.Log.Error(err, "Creation of External StorageCluster Secret failed.", "Secret", klog.KRef(objectKey.Namespace, sec.Name))
 			}
 		} else {
-			r.Log.Error(err, "Unable the get External StorageCluster Secret", "Secret", klog.KRef(sec.Name, objectKey.Namespace))
+			r.Log.Error(err, "Unable the get External StorageCluster Secret", "Secret", klog.KRef(objectKey.Namespace, sec.Name))
 		}
 		return err
 	}
@@ -711,4 +475,16 @@ func (r *StorageClusterReconciler) createExternalStorageClusterSecret(sec *corev
 		}
 	}
 	return nil
+}
+
+func (r *StorageClusterReconciler) deleteExternalSecret(sc *ocsv1.StorageCluster) (err error) {
+	// if 'externalStorage' is not enabled nothing to delete
+	if !sc.Spec.ExternalStorage.Enable {
+		return nil
+	}
+	err = r.deleteSecret(externalClusterDetailsSecret, sc)
+	if err != nil {
+		r.Log.Error(err, "Error while deleting external rhcs mode secret.")
+	}
+	return err
 }

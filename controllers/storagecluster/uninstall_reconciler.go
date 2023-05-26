@@ -41,8 +41,10 @@ const (
 	UninstallModeGraceful UninstallModeType = "graceful"
 )
 
-//nolint:unused // func deleteNodeAffinityKeyFromNodes is not used. For Future usuage func is created.
 // deleteNodeAffinityKeyFromNodes deletes the default NodeAffinityKey from the OCS nodes
+// This is not used, yet.
+//
+// nolint:unused
 func (r *StorageClusterReconciler) deleteNodeAffinityKeyFromNodes(sc *ocsv1.StorageCluster) (err error) {
 
 	// We should delete the label only when the StorageCluster is using the default NodeAffinityKey
@@ -291,14 +293,6 @@ func (r *StorageClusterReconciler) verifyNoStorageConsumerExist(instance *ocsv1.
 // deleteResources is the function where the storageClusterFinalizer is handled
 // Every function that is called within this function should be idempotent
 func (r *StorageClusterReconciler) deleteResources(sc *ocsv1.StorageCluster) (reconcile.Result, error) {
-
-	if IsOCSConsumerMode(sc) {
-		err := r.verifyNoStorageClassClaimsExist(sc)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-
 	// we do not check if it is a provider before checking storageConsumers CR because of corner case
 	// where user can mark instance.Spec.AllowRemoteStorageConsumers as false and mark CR for deletion immediately.
 	// Which will trigger a deletion without having instance.Spec.AllowRemoteStorageConsumers as true.
@@ -346,6 +340,8 @@ func (r *StorageClusterReconciler) deleteResources(sc *ocsv1.StorageCluster) (re
 		&ocsStorageQuota{},
 		&ocsStorageClass{},
 		&ocsCephCluster{},
+		&ocsClusterClaim{},
+		&backingStorageClasses{},
 	}
 
 	for _, obj := range objs {
@@ -363,6 +359,11 @@ func (r *StorageClusterReconciler) deleteResources(sc *ocsv1.StorageCluster) (re
 	}
 
 	err = deleteKMSResources(r, sc)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	err = r.deleteExternalSecret(sc)
 	if err != nil {
 		return reconcile.Result{}, err
 	}

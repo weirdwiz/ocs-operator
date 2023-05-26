@@ -42,6 +42,7 @@ import (
 // +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.message`,description="Message"
 // +kubebuilder:printcolumn:name="Health",type=string,JSONPath=`.status.ceph.health`,description="Ceph Health"
 // +kubebuilder:printcolumn:name="External",type=boolean,JSONPath=`.spec.external.enable`
+// +kubebuilder:printcolumn:name="FSID",type=string,JSONPath=`.status.ceph.fsid`,description="Ceph FSID"
 // +kubebuilder:subresource:status
 type CephCluster struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -242,6 +243,22 @@ type SecuritySpec struct {
 	// +optional
 	// +nullable
 	KeyManagementService KeyManagementServiceSpec `json:"kms,omitempty"`
+	// KeyRotation defines options for Key Rotation.
+	// +optional
+	// +nullable
+	KeyRotation KeyRotationSpec `json:"keyRotation,omitempty"`
+}
+
+// ObjectStoreSecuritySpec is spec to define security features like encryption
+type ObjectStoreSecuritySpec struct {
+	// +optional
+	// +nullable
+	SecuritySpec `json:""`
+
+	// The settings for supporting AWS-SSE:S3 with RGW
+	// +optional
+	// +nullable
+	ServerSideEncryptionS3 KeyManagementServiceSpec `json:"s3,omitempty"`
 }
 
 // KeyManagementServiceSpec represent various details of the KMS server
@@ -256,6 +273,17 @@ type KeyManagementServiceSpec struct {
 	TokenSecretName string `json:"tokenSecretName,omitempty"`
 }
 
+// KeyRotationSpec represents the settings for Key Rotation.
+type KeyRotationSpec struct {
+	// Enabled represents whether the key rotation is enabled.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Schedule represents the cron schedule for key rotation.
+	// +optional
+	Schedule string `json:"schedule,omitempty"`
+}
+
 // CephVersionSpec represents the settings for the Ceph version that Rook is orchestrating.
 type CephVersionSpec struct {
 	// Image is the container image used to launch the ceph daemons, such as quay.io/ceph/ceph:<tag>
@@ -266,6 +294,12 @@ type CephVersionSpec struct {
 	// Whether to allow unsupported versions (do not set to true in production)
 	// +optional
 	AllowUnsupported bool `json:"allowUnsupported,omitempty"`
+
+	// ImagePullPolicy describes a policy for if/when to pull a container image
+	// One of Always, Never, IfNotPresent.
+	// +kubebuilder:validation:Enum=IfNotPresent;Always;Never;""
+	// +optional
+	ImagePullPolicy v1.PullPolicy `json:"imagePullPolicy,omitempty"`
 }
 
 // DashboardSpec represents the settings for the Ceph dashboard
@@ -303,6 +337,16 @@ type MonitoringSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	// +optional
 	ExternalMgrPrometheusPort uint16 `json:"externalMgrPrometheusPort,omitempty"`
+
+	// Port is the prometheus server port
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	Port int `json:"port,omitempty"`
+
+	// Interval determines prometheus scrape interval
+	// +optional
+	Interval *metav1.Duration `json:"interval,omitempty"`
 }
 
 // ClusterStatus represents the status of a Ceph cluster
@@ -852,7 +896,8 @@ type Status struct {
 	Phase string `json:"phase,omitempty"`
 	// ObservedGeneration is the latest generation observed by the controller.
 	// +optional
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	ObservedGeneration int64       `json:"observedGeneration,omitempty"`
+	Conditions         []Condition `json:"conditions,omitempty"`
 }
 
 // ReplicatedSpec represents the spec for replication in a pool
@@ -1316,29 +1361,22 @@ type ObjectStoreSpec struct {
 	// +nullable
 	Zone ZoneSpec `json:"zone,omitempty"`
 
-	// The rgw Bucket healthchecks and liveness probe
+	// The RGW health probes
 	// +optional
 	// +nullable
-	HealthCheck BucketHealthCheckSpec `json:"healthCheck,omitempty"`
+	HealthCheck ObjectHealthCheckSpec `json:"healthCheck,omitempty"`
 
 	// Security represents security settings
 	// +optional
 	// +nullable
-	Security *SecuritySpec `json:"security,omitempty"`
-
-	// Whether host networking is enabled for the rgw daemon. If not set, the network settings from the cluster CR will be applied.
-	// +kubebuilder:pruning:PreserveUnknownFields
-	// +nullable
-	// +optional
-	HostNetwork *bool `json:"hostNetwork,omitempty"`
+	Security *ObjectStoreSecuritySpec `json:"security,omitempty"`
 }
 
-// BucketHealthCheckSpec represents the health check of an object store
-type BucketHealthCheckSpec struct {
-	// +optional
-	Bucket HealthCheckSpec `json:"bucket,omitempty"`
-	// +optional
-	LivenessProbe *ProbeSpec `json:"livenessProbe,omitempty"`
+// ObjectHealthCheckSpec represents the health check of an object store
+type ObjectHealthCheckSpec struct {
+	// livenessProbe field is no longer used
+	// +kubebuilder:pruning:PreserveUnknownFields
+
 	// +optional
 	ReadinessProbe *ProbeSpec `json:"readinessProbe,omitempty"`
 	// +optional
@@ -1412,15 +1450,41 @@ type GatewaySpec struct {
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 
-	// ExternalRgwEndpoints points to external rgw endpoint(s)
+	// ExternalRgwEndpoints points to external RGW endpoint(s). Multiple endpoints can be given, but
+	// for stability of ObjectBucketClaims, we highly recommend that users give only a single
+	// external RGW endpoint that is a load balancer that sends requests to the multiple RGWs.
 	// +nullable
 	// +optional
-	ExternalRgwEndpoints []v1.EndpointAddress `json:"externalRgwEndpoints,omitempty"`
+	ExternalRgwEndpoints []EndpointAddress `json:"externalRgwEndpoints,omitempty"`
 
 	// The configuration related to add/set on each rgw service.
 	// +optional
 	// +nullable
 	Service *RGWServiceSpec `json:"service,omitempty"`
+
+	// Whether host networking is enabled for the rgw daemon. If not set, the network settings from the cluster CR will be applied.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +nullable
+	// +optional
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
+	// Whether rgw dashboard is enabled for the rgw daemon. If not set, the rgw dashboard will be enabled.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +nullable
+	// +optional
+	DashboardEnabled *bool `json:"dashboardEnabled,omitempty"`
+}
+
+// EndpointAddress is a tuple that describes a single IP address or host name. This is a subset of
+// Kubernetes's v1.EndpointAddress.
+// +structType=atomic
+type EndpointAddress struct {
+	// The IP of this endpoint.
+	// +optional
+	IP string `json:"ip" protobuf:"bytes,1,opt,name=ip"`
+	// The Hostname of this endpoint
+	// +optional
+	Hostname string `json:"hostname,omitempty" protobuf:"bytes,3,opt,name=hostname"`
 }
 
 // ZoneSpec represents a Ceph Object Store Gateway Zone specification
@@ -1436,7 +1500,7 @@ type ObjectStoreStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 	// +optional
-	BucketStatus *BucketStatus `json:"bucketStatus,omitempty"`
+	Endpoints ObjectEndpoints `json:"endpoints"`
 	// +optional
 	// +nullable
 	Info       map[string]string `json:"info,omitempty"`
@@ -1446,16 +1510,13 @@ type ObjectStoreStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
-// BucketStatus represents the status of a bucket
-type BucketStatus struct {
+type ObjectEndpoints struct {
 	// +optional
-	Health ConditionType `json:"health,omitempty"`
+	// +nullable
+	Insecure []string `json:"insecure"`
 	// +optional
-	Details string `json:"details,omitempty"`
-	// +optional
-	LastChecked string `json:"lastChecked,omitempty"`
-	// +optional
-	LastChanged string `json:"lastChanged,omitempty"`
+	// +nullable
+	Secure []string `json:"secure"`
 }
 
 // CephObjectStoreUser represents a Ceph Object Store Gateway User
@@ -1651,6 +1712,21 @@ type ObjectZoneSpec struct {
 	// The data pool settings
 	// +nullable
 	DataPool PoolSpec `json:"dataPool"`
+
+	// If this zone cannot be accessed from other peer Ceph clusters via the ClusterIP Service
+	// endpoint created by Rook, you must set this to the externally reachable endpoint(s). You may
+	// include the port in the definition. For example: "https://my-object-store.my-domain.net:443".
+	// In many cases, you should set this to the endpoint of the ingress resource that makes the
+	// CephObjectStore associated with this CephObjectStoreZone reachable to peer clusters.
+	// The list can have one or more endpoints pointing to different RGW servers in the zone.
+	// +nullable
+	// +optional
+	CustomEndpoints []string `json:"customEndpoints,omitempty"`
+
+	// Preserve pools on object zone deletion
+	// +optional
+	// +kubebuilder:default=true
+	PreservePoolsOnDelete bool `json:"preservePoolsOnDelete"`
 }
 
 // CephBucketTopic represents a Ceph Object Topic for Bucket Notifications
@@ -1880,6 +1956,11 @@ type NFSGaneshaSpec struct {
 
 	// Server is the Ganesha Server specification
 	Server GaneshaServerSpec `json:"server"`
+
+	// Security allows specifying security configurations for the NFS cluster
+	// +nullable
+	// +optional
+	Security *NFSSecuritySpec `json:"security"`
 }
 
 // GaneshaRADOSSpec represents the specification of a Ganesha RADOS object
@@ -1933,6 +2014,152 @@ type GaneshaServerSpec struct {
 	// LogLevel set logging level
 	// +optional
 	LogLevel string `json:"logLevel,omitempty"`
+
+	// Whether host networking is enabled for the Ganesha server. If not set, the network settings from the cluster CR will be applied.
+	// +nullable
+	// +optional
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
+}
+
+// NFSSecuritySpec represents security configurations for an NFS server pod
+type NFSSecuritySpec struct {
+	// SSSD enables integration with System Security Services Daemon (SSSD). SSSD can be used to
+	// provide user ID mapping from a number of sources. See https://sssd.io for more information
+	// about the SSSD project.
+	// +optional
+	// +nullable
+	SSSD *SSSDSpec `json:"sssd,omitempty"`
+
+	// Kerberos configures NFS-Ganesha to secure NFS client connections with Kerberos.
+	// +optional
+	// +nullable
+	Kerberos *KerberosSpec `json:"kerberos,omitempty"`
+}
+
+// KerberosSpec represents configuration for Kerberos.
+type KerberosSpec struct {
+	// PrincipalName corresponds directly to NFS-Ganesha's NFS_KRB5:PrincipalName config. In
+	// practice, this is the service prefix of the principal name. The default is "nfs".
+	// This value is combined with (a) the namespace and name of the CephNFS (with a hyphen between)
+	// and (b) the Realm configured in the user-provided krb5.conf to determine the full principal
+	// name: <principalName>/<namespace>-<name>@<realm>. e.g., nfs/rook-ceph-my-nfs@example.net.
+	// See https://github.com/nfs-ganesha/nfs-ganesha/wiki/RPCSEC_GSS for more detail.
+	// +optional
+	// +kubebuilder:default="nfs"
+	PrincipalName string `json:"principalName"`
+
+	// ConfigFiles defines where the Kerberos configuration should be sourced from. Config files
+	// will be placed into the `/etc/krb5.conf.rook/` directory.
+	//
+	// If this is left empty, Rook will not add any files. This allows you to manage the files
+	// yourself however you wish. For example, you may build them into your custom Ceph container
+	// image or use the Vault agent injector to securely add the files via annotations on the
+	// CephNFS spec (passed to the NFS server pods).
+	//
+	// Rook configures Kerberos to log to stderr. We suggest removing logging sections from config
+	// files to avoid consuming unnecessary disk space from logging to files.
+	// +optional
+	ConfigFiles KerberosConfigFiles `json:"configFiles"`
+
+	// KeytabFile defines where the Kerberos keytab should be sourced from. The keytab file will be
+	// placed into `/etc/krb5.keytab`. If this is left empty, Rook will not add the file.
+	// This allows you to manage the `krb5.keytab` file yourself however you wish. For example, you
+	// may build it into your custom Ceph container image or use the Vault agent injector to
+	// securely add the file via annotations on the CephNFS spec (passed to the NFS server pods).
+	// +optional
+	KeytabFile KerberosKeytabFile `json:"keytabFile"`
+}
+
+// KerberosConfigFiles represents the source(s) from which Kerberos configuration should come.
+type KerberosConfigFiles struct {
+	// VolumeSource accepts a standard Kubernetes VolumeSource for Kerberos configuration files like
+	// what is normally used to configure Volumes for a Pod. For example, a ConfigMap, Secret, or
+	// HostPath. The volume may contain multiple files, all of which will be loaded.
+	VolumeSource *v1.VolumeSource `json:"volumeSource,omitempty"`
+}
+
+// KerberosKeytabFile represents the source(s) from which the Kerberos keytab file should come.
+type KerberosKeytabFile struct {
+	// VolumeSource accepts a standard Kubernetes VolumeSource for the Kerberos keytab file like
+	// what is normally used to configure Volumes for a Pod. For example, a Secret or HostPath.
+	// There are two requirements for the source's content:
+	//   1. The config file must be mountable via `subPath: krb5.keytab`. For example, in a
+	//      Secret, the data item must be named `krb5.keytab`, or `items` must be defined to
+	//      select the key and give it path `krb5.keytab`. A HostPath directory must have the
+	//      `krb5.keytab` file.
+	//   2. The volume or config file must have mode 0600.
+	VolumeSource *v1.VolumeSource `json:"volumeSource,omitempty"`
+}
+
+// SSSDSpec represents configuration for System Security Services Daemon (SSSD).
+type SSSDSpec struct {
+	// Sidecar tells Rook to run SSSD in a sidecar alongside the NFS-Ganesha server in each NFS pod.
+	// +optional
+	Sidecar *SSSDSidecar `json:"sidecar,omitempty"`
+}
+
+// SSSDSidecar represents configuration when SSSD is run in a sidecar.
+type SSSDSidecar struct {
+	// Image defines the container image that should be used for the SSSD sidecar.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// SSSDConfigFile defines where the SSSD configuration should be sourced from. The config file
+	// will be placed into `/etc/sssd/sssd.conf`. If this is left empty, Rook will not add the file.
+	// This allows you to manage the `sssd.conf` file yourself however you wish. For example, you
+	// may build it into your custom Ceph container image or use the Vault agent injector to
+	// securely add the file via annotations on the CephNFS spec (passed to the NFS server pods).
+	// +optional
+	SSSDConfigFile SSSDSidecarConfigFile `json:"sssdConfigFile"`
+
+	// AdditionalFiles defines any number of additional files that should be mounted into the SSSD
+	// sidecar. These files may be referenced by the sssd.conf config file.
+	// +optional
+	AdditionalFiles []SSSDSidecarAdditionalFile `json:"additionalFiles,omitempty"`
+
+	// Resources allow specifying resource requests/limits on the SSSD sidecar container.
+	// +optional
+	Resources v1.ResourceRequirements `json:"resources,omitempty"`
+
+	// DebugLevel sets the debug level for SSSD. If unset or set to 0, Rook does nothing. Otherwise,
+	// this may be a value between 1 and 10. See SSSD docs for more info:
+	// https://sssd.io/troubleshooting/basics.html#sssd-debug-logs
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10
+	DebugLevel int `json:"debugLevel,omitempty"`
+}
+
+// SSSDSidecarConfigFile represents the source(s) from which the SSSD configuration should come.
+type SSSDSidecarConfigFile struct {
+	// VolumeSource accepts a standard Kubernetes VolumeSource for the SSSD configuration file like
+	// what is normally used to configure Volumes for a Pod. For example, a ConfigMap, Secret, or
+	// HostPath. There are two requirements for the source's content:
+	//   1. The config file must be mountable via `subPath: sssd.conf`. For example, in a ConfigMap,
+	//      the data item must be named `sssd.conf`, or `items` must be defined to select the key
+	//      and give it path `sssd.conf`. A HostPath directory must have the `sssd.conf` file.
+	//   2. The volume or config file must have mode 0600.
+	VolumeSource *v1.VolumeSource `json:"volumeSource,omitempty"`
+}
+
+// SSSDSidecarAdditionalFile represents the source from where additional files for the the SSSD
+// configuration should come from and are made available.
+type SSSDSidecarAdditionalFile struct {
+	// SubPath defines the sub-path in `/etc/sssd/rook-additional/` where the additional file(s)
+	// will be placed. Each subPath definition must be unique and must not contain ':'.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[^:]+$`
+	SubPath string `json:"subPath"`
+
+	// VolumeSource accepts standard Kubernetes VolumeSource for the additional file(s) like what is
+	// normally used to configure Volumes for a Pod. Fore example, a ConfigMap, Secret, or HostPath.
+	// Each VolumeSource adds one or more additional files to the SSSD sidecar container in the
+	// `/etc/sssd/rook-additional/<subPath>` directory.
+	// Be aware that some files may need to have a specific file mode like 0600 due to requirements
+	// by SSSD for some files. For example, CA or TLS certificates.
+	VolumeSource *v1.VolumeSource `json:"volumeSource"`
 }
 
 // NetworkSpec for Ceph includes backward compatibility code
@@ -1968,8 +2195,23 @@ type NetworkSpec struct {
 	// DualStack determines whether Ceph daemons should listen on both IPv4 and IPv6
 	// +optional
 	DualStack bool `json:"dualStack,omitempty"`
+
+	// Enable multiClusterService to export the Services between peer clusters
+	// +optional
+	MultiClusterService MultiClusterServiceSpec `json:"multiClusterService,omitempty"`
 }
 
+type MultiClusterServiceSpec struct {
+	// Enable multiClusterService to export the mon and OSD services to peer cluster.
+	// Ensure that peer clusters are connected using an MCS API compatible application,
+	// like Globalnet Submariner.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ClusterID uniquely identifies a cluster. It is used as a prefix to nslookup exported
+	// services. For example: <clusterid>.<svc>.<ns>.svc.clusterset.local
+	ClusterID string `json:"clusterID,omitempty"`
+}
 type ConnectionsSpec struct {
 	// Encryption settings for the network connections.
 	// +nullable
@@ -1980,6 +2222,12 @@ type ConnectionsSpec struct {
 	// +nullable
 	// +optional
 	Compression *CompressionSpec `json:"compression,omitempty"`
+
+	// Whether to require msgr2 (port 3300) even if compression or encryption are not enabled.
+	// If true, the msgr1 port (6789) will be disabled.
+	// Requires a kernel that supports msgr2 (kernel 5.11 or CentOS 8.4 or newer).
+	// +optional
+	RequireMsgr2 bool `json:"requireMsgr2,omitempty"`
 }
 
 type EncryptionSpec struct {
@@ -2019,11 +2267,11 @@ type DisruptionManagementSpec struct {
 	// +optional
 	PGHealthCheckTimeout time.Duration `json:"pgHealthCheckTimeout,omitempty"`
 
-	// This enables management of machinedisruptionbudgets
+	// Deprecated. This enables management of machinedisruptionbudgets.
 	// +optional
 	ManageMachineDisruptionBudgets bool `json:"manageMachineDisruptionBudgets,omitempty"`
 
-	// Namespace to look for MDBs by the machineDisruptionBudgetController
+	// Deprecated. Namespace to look for MDBs by the machineDisruptionBudgetController
 	// +optional
 	MachineDisruptionBudgetNamespace string `json:"machineDisruptionBudgetNamespace,omitempty"`
 }

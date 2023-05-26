@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	api "github.com/red-hat-storage/ocs-operator/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -24,7 +24,8 @@ func assertVolumeSnapshotterClasses(t *testing.T, reconciler StorageClusterRecon
 	cr *api.StorageCluster, request reconcile.Request) {
 	rbdVSCName := "ocsinit-rbdplugin-snapclass"
 	cephfsVSCName := "ocsinit-cephfsplugin-snapclass"
-	vscNames := []string{cephfsVSCName, rbdVSCName}
+	cephnfsVSCName := "ocsinit-nfsplugin-snapclass"
+	vscNames := []string{cephfsVSCName, rbdVSCName, cephnfsVSCName}
 	for _, eachVSCName := range vscNames {
 		actualVSC := &snapapi.VolumeSnapshotClass{
 			ObjectMeta: metav1.ObjectMeta{

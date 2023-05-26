@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	k8sYAML "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/tools/clientcmd"
@@ -56,7 +57,10 @@ type knownDiskType struct {
 // This list allows to specify disks from which storage classes to tune for fast
 // or slow disk optimization.
 var knownDiskTypes = []knownDiskType{
+	// only gp2-csi SC is present in the installations starting with OCP 4.12
+	// gp2 is still required to support upgrades from 4.11 to 4.12.
 	{diskSpeedSlow, EBS, "gp2"},
+	{diskSpeedSlow, EBS, "gp2-csi"},
 	{diskSpeedSlow, EBS, "io1"},
 	{diskSpeedFast, AzureDisk, "managed-premium"},
 }
@@ -91,9 +95,20 @@ func arbiterEnabled(sc *ocsv1.StorageCluster) bool {
 // ensureCreated ensures that a CephCluster resource exists with its Spec in
 // the desired state.
 func (obj *ocsCephCluster) ensureCreated(r *StorageClusterReconciler, sc *ocsv1.StorageCluster) (reconcile.Result, error) {
-	reconcileStrategy := ReconcileStrategy(sc.Spec.ManagedResources.CephCluster.ReconcileStrategy)
+	var (
+		cephCluster       *rookCephv1.CephCluster
+		err               error
+		reconcileStrategy = ReconcileStrategy(sc.Spec.ManagedResources.CephCluster.ReconcileStrategy)
+	)
 	if reconcileStrategy == ReconcileStrategyIgnore {
 		return reconcile.Result{}, nil
+	}
+
+	// ensure the ocs-operator-config cm exists & has the correct values
+	err = r.ensureOCSOperatorConfig(sc)
+	if err != nil {
+		r.Log.Error(err, "Failed to ensure ocs-operator-config ConfigMap")
+		return reconcile.Result{}, err
 	}
 
 	if sc.Spec.ExternalStorage.Enable && len(sc.Spec.StorageDeviceSets) != 0 {
@@ -125,8 +140,6 @@ func (obj *ocsCephCluster) ensureCreated(r *StorageClusterReconciler, sc *ocsv1.
 		}
 	}
 
-	var cephCluster *rookCephv1.CephCluster
-	var err error
 	// Define a new CephCluster object
 	if sc.Spec.ExternalStorage.Enable {
 		extRArr, ok := externalOCSResources[sc.UID]
@@ -162,13 +175,11 @@ func (obj *ocsCephCluster) ensureCreated(r *StorageClusterReconciler, sc *ocsv1.
 				return reconcile.Result{}, err
 			}
 			if kmsConfigMap != nil {
+				if kmsConfigMap.Data["KMS_PROVIDER"] == "vault" {
+					sc.Status.KMSServerConnection.KMSServerAddress = kmsConfigMap.Data["VAULT_ADDR"]
+				}
 				if err = reachKMSProvider(kmsConfigMap); err != nil {
-					if kmsConfigMap.Data["KMS_PROVIDER"] == "vault" {
-						sc.Status.KMSServerConnection = ocsv1.KMSServerConnectionStatus{
-							KMSServerAddress:         kmsConfigMap.Data["VAULT_ADDR"],
-							KMSServerConnectionError: err.Error(),
-						}
-					}
+					sc.Status.KMSServerConnection.KMSServerConnectionError = err.Error()
 					r.Log.Error(err, "Address provided in KMS ConfigMap is not reachable.", "KMSConfigMap", klog.KRef(kmsConfigMap.Namespace, kmsConfigMap.Name))
 					return reconcile.Result{}, err
 				}
@@ -462,12 +473,13 @@ func newCephCluster(sc *ocsv1.StorageCluster, cephImage string, nodeCount int, s
 
 	// if kmsConfig is not 'nil', add the KMS details to CephCluster spec
 	if kmsConfigMap != nil {
-		// Set default KMS_PROVIDER. Possible values are: vault, ibmkeyprotect.
+		// Set default KMS_PROVIDER. Possible values are: vault, ibmkeyprotect, kmip.
 		if _, ok := kmsConfigMap.Data["KMS_PROVIDER"]; !ok {
 			kmsConfigMap.Data["KMS_PROVIDER"] = VaultKMSProvider
 		}
+		var kmsProviderName = kmsConfigMap.Data["KMS_PROVIDER"]
 		// vault as a KMS service provider
-		if kmsConfigMap.Data["KMS_PROVIDER"] == VaultKMSProvider {
+		if kmsProviderName == VaultKMSProvider {
 			// Set default VAULT_SECRET_ENGINE values
 			if _, ok := kmsConfigMap.Data["VAULT_SECRET_ENGINE"]; !ok {
 				kmsConfigMap.Data["VAULT_SECRET_ENGINE"] = "kv"
@@ -481,9 +493,9 @@ func newCephCluster(sc *ocsv1.StorageCluster, cephImage string, nodeCount int, s
 				// Secret is created by UI in "openshift-storage" namespace
 				cephCluster.Spec.Security.KeyManagementService.TokenSecretName = KMSTokenSecretName
 			}
-		} else if kmsConfigMap.Data["KMS_PROVIDER"] == IbmKeyProtectKMSProvider {
+		} else if kmsProviderName == IbmKeyProtectKMSProvider || kmsProviderName == ThalesKMSProvider {
 			// Secret is created by UI in "openshift-storage" namespace
-			cephCluster.Spec.Security.KeyManagementService.TokenSecretName = kmsConfigMap.Data["IBM_KP_SECRET_NAME"]
+			cephCluster.Spec.Security.KeyManagementService.TokenSecretName = kmsConfigMap.Data[kmsProviderSecretKeyMap[kmsProviderName]]
 		}
 		cephCluster.Spec.Security.KeyManagementService.ConnectionDetails = kmsConfigMap.Data
 	}
@@ -509,8 +521,6 @@ func validateMultusSelectors(selectors map[string]string) error {
 	return nil
 }
 
-// getNetworkSpec returns cephv1.NetworkSpec after reconciling the
-// storageCluster.Spec.HostNetwork and storageCluster.Spec.Network fields
 func getNetworkSpec(sc ocsv1.StorageCluster) rookCephv1.NetworkSpec {
 	networkSpec := rookCephv1.NetworkSpec{}
 	if sc.Spec.Network != nil {
@@ -518,6 +528,15 @@ func getNetworkSpec(sc ocsv1.StorageCluster) rookCephv1.NetworkSpec {
 	}
 	// respect both the old way and the new way for enabling HostNetwork
 	networkSpec.HostNetwork = networkSpec.HostNetwork || sc.Spec.HostNetwork
+
+	// If it's not an external and not a provider cluster always require msgr2
+	if !sc.Spec.AllowRemoteStorageConsumers && !sc.Spec.ExternalStorage.Enable {
+		if networkSpec.Connections == nil {
+			networkSpec.Connections = &rookCephv1.ConnectionsSpec{}
+		}
+		networkSpec.Connections.RequireMsgr2 = true
+	}
+
 	return networkSpec
 }
 
@@ -561,6 +580,7 @@ func newExternalCephCluster(sc *ocsv1.StorageCluster, cephImage, monitoringIP, m
 				ManageMachineDisruptionBudgets: false,
 			},
 			Monitoring: monitoringSpec,
+			Network:    getNetworkSpec(*sc),
 			Labels: rookCephv1.LabelsSpec{
 				rookCephv1.KeyMonitoring: getCephClusterMonitoringLabels(*sc),
 			},
@@ -624,6 +644,13 @@ func getMinimumNodes(sc *ocsv1.StorageCluster) int {
 	}
 
 	return maxReplica
+}
+
+func getMgrCount(arbiterMode bool) int {
+	if arbiterMode {
+		return defaults.ArbiterModeMgrCount
+	}
+	return defaults.DefaultMgrCount
 }
 
 func getMonCount(nodeCount int, arbiter bool) int {
@@ -710,7 +737,7 @@ func newStorageClassDeviceSets(sc *ocsv1.StorageCluster, serverVersion *version.
 						if portable && !strings.Contains(topologyKey, "zone") {
 							addStrictFailureDomainTSC(&placement, topologyKey)
 						}
-						// If topologyKey is not host, append additional topology spread constarint to the
+						// If topologyKey is not host, append additional topology spread constraint to the
 						// default preparePlacement. This serves even distribution at the host level
 						// within a failure domain (zone/rack).
 						if noPreparePlacement {
@@ -758,14 +785,18 @@ func newStorageClassDeviceSets(sc *ocsv1.StorageCluster, serverVersion *version.
 			annotations := map[string]string{
 				"crushDeviceClass": crushDeviceClass,
 			}
-			// Annotation crushInitialWeight is an optinal, explicit weight to set upon OSD's init (as float, in TiB units).
+			// if Non-Resilient Pools are enabled then change the existing osd crushDeviceClass to "replicated"
+			if sc.Spec.ManagedResources.CephNonResilientPools.Enable {
+				annotations["crushDeviceClass"] = "replicated"
+			}
+			// Annotation crushInitialWeight is an optional, explicit weight to set upon OSD's init (as float, in TiB units).
 			// ROOK & Ceph do not want any (optional) Ti[B] suffix, so trim it here.
 			// If not set, Ceph will define OSD's weight based on its capacity.
 			crushInitialWeight := strings.TrimSuffix(strings.TrimSuffix(ds.InitialWeight, "Ti"), "TiB")
 			if crushInitialWeight != "" {
 				annotations["crushInitialWeight"] = crushInitialWeight
 			}
-			// Annotation crushPrimaryAffinity is an optinal, explicit primary-affinity value within the range [0,1) to
+			// Annotation crushPrimaryAffinity is an optional, explicit primary-affinity value within the range [0,1) to
 			// set upon OSD's deployment. If not set, Ceph sets default value to 1
 			if ds.PrimaryAffinity != "" {
 				annotations["crushPrimaryAffinity"] = ds.PrimaryAffinity
@@ -799,6 +830,62 @@ func newStorageClassDeviceSets(sc *ocsv1.StorageCluster, serverVersion *version.
 		}
 	}
 
+	if sc.Spec.ManagedResources.CephNonResilientPools.Enable {
+		// Creating osds for non-resilient pools
+		for _, failureDomainValue := range sc.Status.FailureDomainValues {
+			ds := rookCephv1.StorageClassDeviceSet{}
+			ds.Name = failureDomainValue
+			ds.Count = 1
+			ds.Resources = defaults.DaemonResources["osd"]
+			// passing on existing defaults from existing devcicesets
+			ds.TuneSlowDeviceClass = sc.Spec.StorageDeviceSets[0].Config.TuneSlowDeviceClass
+			ds.TuneFastDeviceClass = sc.Spec.StorageDeviceSets[0].Config.TuneFastDeviceClass
+			annotations := map[string]string{
+				"crushDeviceClass": failureDomainValue,
+			}
+			// using the spec for volumeclaimtemplate from existing devicesets including the storageclass
+			volumeClaimTemplateSpec := storageClassDeviceSets[0].VolumeClaimTemplates[0].Spec
+			ds.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: annotations,
+					},
+					Spec: volumeClaimTemplateSpec,
+				},
+			}
+			ds.Portable = sc.Status.FailureDomain != "host"
+			placement := rookCephv1.Placement{}
+			// Portable OSDs must have an node affinity to their zone
+			// Non-portable OSDs must have an affinity to the node
+			placement.NodeAffinity = &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      sc.Status.FailureDomainKey,
+									Operator: corev1.NodeSelectorOpIn,
+									Values:   []string{failureDomainValue},
+								},
+							},
+						},
+					},
+				},
+			}
+			// default tolerations for any ocs operator pods
+			placement.Tolerations = []corev1.Toleration{
+				{
+					Key:      defaults.NodeTolerationKey,
+					Operator: corev1.TolerationOpEqual,
+					Value:    "true",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			}
+			ds.Placement = placement
+			ds.PreparePlacement = &placement
+			storageClassDeviceSets = append(storageClassDeviceSets, ds)
+		}
+	}
 	return storageClassDeviceSets
 }
 
@@ -937,14 +1024,15 @@ func generateMonSpec(sc *ocsv1.StorageCluster, nodeCount int) rookCephv1.MonSpec
 
 func generateMgrSpec(sc *ocsv1.StorageCluster) rookCephv1.MgrSpec {
 	spec := rookCephv1.MgrSpec{
+		Count: getMgrCount(arbiterEnabled(sc)),
 		Modules: []rookCephv1.Module{
 			{Name: "pg_autoscaler", Enabled: true},
 			{Name: "balancer", Enabled: true},
 		},
 	}
-
-	if arbiterEnabled(sc) {
+	if sc.Spec.Mgr != nil && sc.Spec.Mgr.EnableActivePassive {
 		spec.Count = 2
+		spec.AllowMultiplePerNode = false
 	}
 
 	return spec
@@ -958,7 +1046,7 @@ func getCephObjectStoreGatewayInstances(sc *ocsv1.StorageCluster) int32 {
 }
 
 // addStrictFailureDomainTSC adds hard topology constraints at failure domain level
-// and uses soft topology constraints within falure domain (across host).
+// and uses soft topology constraints within failure domain (across host).
 func addStrictFailureDomainTSC(placement *rookCephv1.Placement, topologyKey string) {
 	newTSC := placement.TopologySpreadConstraints[0]
 	newTSC.TopologyKey = topologyKey
@@ -997,6 +1085,17 @@ func createPrometheusRules(r *StorageClusterReconciler, sc *ocsv1.StorageCluster
 		return err
 	}
 	applyLabels(getCephClusterMonitoringLabels(*sc), &prometheusRule.ObjectMeta)
+	replaceTokens := []exprReplaceToken{
+		{
+			recordOrAlertName: "CephMgrIsAbsent",
+			wordInExpr:        "openshift-storage",
+			replaceWith:       sc.Namespace,
+		},
+	}
+	// nothing to replace in external mode
+	if name != prometheusExternalRuleName {
+		changePromRuleExpr(prometheusRule, replaceTokens)
+	}
 
 	if err := createOrUpdatePrometheusRule(r, sc, prometheusRule); err != nil {
 		r.Log.Error(err, "Prometheus rules could not be created.", "CephCluster", klog.KRef(cluster.Namespace, cluster.Name))
@@ -1015,6 +1114,43 @@ func applyLabels(labels map[string]string, t *metav1.ObjectMeta) {
 	}
 	for k, v := range labels {
 		t.Labels[k] = v
+	}
+}
+
+type exprReplaceToken struct {
+	groupName         string
+	recordOrAlertName string
+	wordInExpr        string
+	replaceWith       string
+}
+
+func changePromRuleExpr(promRules *monitoringv1.PrometheusRule, replaceTokens []exprReplaceToken) {
+	if promRules == nil {
+		return
+	}
+	for _, eachToken := range replaceTokens {
+		// if both the words, one being replaced and the one replacing it, are same
+		// then we don't have to do anything
+		if eachToken.replaceWith == eachToken.wordInExpr {
+			continue
+		}
+		for gIndx, currGroup := range promRules.Spec.Groups {
+			if eachToken.groupName != "" && eachToken.groupName != currGroup.Name {
+				continue
+			}
+			for rIndx, currRule := range currGroup.Rules {
+				if eachToken.recordOrAlertName != "" {
+					if currRule.Record != "" && currRule.Record != eachToken.recordOrAlertName {
+						continue
+					} else if currRule.Alert != "" && currRule.Alert != eachToken.recordOrAlertName {
+						continue
+					}
+				}
+				exprStr := currRule.Expr.String()
+				newExpr := strings.Replace(exprStr, eachToken.wordInExpr, eachToken.replaceWith, -1)
+				promRules.Spec.Groups[gIndx].Rules[rIndx].Expr = intstr.Parse(newExpr)
+			}
+		}
 	}
 }
 

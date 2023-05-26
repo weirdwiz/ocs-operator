@@ -2,11 +2,9 @@ package storagecluster
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	ocsv1 "github.com/red-hat-storage/ocs-operator/api/v1"
-	"github.com/red-hat-storage/ocs-operator/controllers/util"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 )
 
@@ -30,6 +28,10 @@ func generateNameForNFSService(initData *ocsv1.StorageCluster) string {
 	return fmt.Sprintf("%s-service", generateNameForCephNFS(initData))
 }
 
+func generateNameForNFSServiceMonitor(initData *ocsv1.StorageCluster) string {
+	return fmt.Sprintf("%s-servicemonitor", generateNameForCephNFS(initData))
+}
+
 func generateNameForCephNFSBlockPool(initData *ocsv1.StorageCluster) string {
 	return fmt.Sprintf("%s-builtin-pool", generateNameForCephNFS(initData))
 }
@@ -40,6 +42,18 @@ func generateNameForCephObjectStoreUser(initData *ocsv1.StorageCluster) string {
 
 func generateNameForCephBlockPool(initData *ocsv1.StorageCluster) string {
 	return fmt.Sprintf("%s-cephblockpool", initData.Name)
+}
+
+func generateDeviceClass(initData *ocsv1.StorageCluster) string {
+	if initData.Spec.ManagedResources.CephNonResilientPools.Enable {
+		return "replicated"
+	}
+	// if Non-Resilient pools are not enabled then keep the device class blank
+	return ""
+}
+
+func generateNameForNonResilientCephBlockPool(initData *ocsv1.StorageCluster, failureDomainValue string) string {
+	return fmt.Sprintf("%s-cephblockpool-%s", initData.Name, failureDomainValue)
 }
 
 func generateNameForCephObjectStore(initData *ocsv1.StorageCluster) string {
@@ -58,6 +72,10 @@ func generateNameForCephBlockPoolSC(initData *ocsv1.StorageCluster) string {
 	return fmt.Sprintf("%s-ceph-rbd", initData.Name)
 }
 
+func generateNameForNonResilientCephBlockPoolSC(initData *ocsv1.StorageCluster) string {
+	return fmt.Sprintf("%s-ceph-non-resilient-rbd", initData.Name)
+}
+
 func generateNameForEncryptedCephBlockPoolSC(initData *ocsv1.StorageCluster) string {
 	return fmt.Sprintf("%s-ceph-rbd-encrypted", initData.Name)
 }
@@ -71,7 +89,7 @@ func generateNameForNFSCSIProvisioner(initData *ocsv1.StorageCluster) string {
 }
 
 // generateNameForSnapshotClass function generates 'SnapshotClass' name.
-// 'snapshotType' can be: 'rbdSnapshotter' or 'cephfsSnapshotter'
+// 'snapshotType' can be: 'rbdSnapshotter' or 'cephfsSnapshotter' or 'nfsSnapshotter'
 func generateNameForSnapshotClass(initData *ocsv1.StorageCluster, snapshotType SnapshotterType) string {
 	return fmt.Sprintf("%s-%splugin-snapclass", initData.Name, snapshotType)
 }
@@ -81,6 +99,10 @@ func generateNameForSnapshotClassDriver(initData *ocsv1.StorageCluster, snapshot
 }
 
 func generateNameForSnapshotClassSecret(instance *ocsv1.StorageCluster, snapshotType SnapshotterType) string {
+	// nfs uses the same cephfs secrets
+	if snapshotType == "nfs" {
+		snapshotType = "cephfs"
+	}
 	if instance.Spec.ExternalStorage.Enable {
 		data, ok := externalOCSResources[instance.UID]
 		if !ok {
@@ -121,30 +143,4 @@ func generateCephReplicatedSpec(initData *ocsv1.StorageCluster, poolType string)
 // generateStorageQuotaName function generates a name for ClusterResourceQuota
 func generateStorageQuotaName(storageClassName, quotaName string) string {
 	return fmt.Sprintf("%s-%s", storageClassName, quotaName)
-}
-
-// GenerateCephFSProviderParameters function generates extra parameters required for provider storage clusters
-func GenerateCephFSProviderParameters(initData *ocsv1.StorageCluster) (map[string]string, error) {
-	deviceSetList := initData.Spec.StorageDeviceSets
-	var deviceSet *ocsv1.StorageDeviceSet
-	for i := range deviceSetList {
-		ds := &deviceSetList[i]
-		if ds.Name == "default" {
-			deviceSet = ds
-			break
-		}
-	}
-	if deviceSet != nil {
-		deviceCount := deviceSet.Count
-		pgUnitSize := util.GetPGBaseUnitSize(deviceCount)
-		pgNumValue := pgUnitSize * 4
-		providerParameters := map[string]string{
-			"pg_autoscale_mode": "off",
-			"pg_num":            strconv.Itoa(pgNumValue),
-			"pgp_num":           strconv.Itoa(pgNumValue),
-		}
-		return providerParameters, nil
-	}
-	return nil, fmt.Errorf("Could not find  device set named default in Storage cluster")
-
 }

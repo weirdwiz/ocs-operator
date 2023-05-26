@@ -141,6 +141,9 @@ func (r *StorageClusterReconciler) setNooBaaDesiredState(nb *nbv1.NooBaa, sc *oc
 		placement := getPlacement(sc, "noobaa-core")
 		nb.Spec.Tolerations = placement.Tolerations
 		nb.Spec.Affinity = &corev1.Affinity{NodeAffinity: placement.NodeAffinity}
+	} else {
+		placement := getPlacement(sc, "noobaa-standalone")
+		nb.Spec.Tolerations = placement.Tolerations
 	}
 	nb.Spec.DBVolumeResources = &dBVolumeResources
 	nb.Spec.Image = &r.images.NooBaaCore
@@ -178,25 +181,25 @@ func (r *StorageClusterReconciler) setNooBaaDesiredState(nb *nbv1.NooBaa, sc *oc
 				nb.Spec.Endpoints.Resources = epSpec.Resources
 			}
 		}
+		nb.Spec.DisableLoadBalancerService = sc.Spec.MultiCloudGateway.DisableLoadBalancerService
 	}
 
 	// Add KMS details to Noobaa spec, only if
-	// cluster-wide encryption or KMS is enabled
-	// ie, sc.Spec.Encryption.ClusterWide or sc.Spec.Encryption.KeyManagementService.Enable is True
-	// and KMS ConfigMap is available
+	// KMS is enabled, along with
+	// ClusterWide encryption OR in a StandAlone Noobaa cluster mode
 	// PS: sc.Spec.Encryption.Enable field is deprecated and added for backward compatibility
-	if sc.Spec.Encryption.Enable ||
-		sc.Spec.Encryption.ClusterWide ||
-		sc.Spec.Encryption.KeyManagementService.Enable {
+	if sc.Spec.Encryption.KeyManagementService.Enable &&
+		(sc.Spec.Encryption.Enable || sc.Spec.Encryption.ClusterWide || r.IsNoobaaStandalone) {
 		if kmsConfig, err := getKMSConfigMap(KMSConfigMapName, sc, r.Client); err != nil {
 			return err
 		} else if kmsConfig != nil {
-			// Set default KMS_PROVIDER, if it is empty. Possible values are: vault, ibmkeyprotect.
+			// Set default KMS_PROVIDER, if it is empty. Possible values are: vault, ibmkeyprotect, kmip.
 			if kmsConfig.Data["KMS_PROVIDER"] == "" {
 				kmsConfig.Data["KMS_PROVIDER"] = VaultKMSProvider
 			}
+			var kmsProviderName = kmsConfig.Data["KMS_PROVIDER"]
 			// vault as a KMS service provider
-			if kmsConfig.Data["KMS_PROVIDER"] == VaultKMSProvider {
+			if kmsProviderName == VaultKMSProvider {
 				// Set default VAULT_AUTH_METHOD. Possible values are: token, kubernetes.
 				if kmsConfig.Data["VAULT_AUTH_METHOD"] == "" {
 					kmsConfig.Data["VAULT_AUTH_METHOD"] = VaultTokenAuthMethod
@@ -206,9 +209,9 @@ func (r *StorageClusterReconciler) setNooBaaDesiredState(nb *nbv1.NooBaa, sc *oc
 					// Secret is created by UI in "openshift-storage" namespace
 					nb.Spec.Security.KeyManagementService.TokenSecretName = KMSTokenSecretName
 				}
-			} else if kmsConfig.Data["KMS_PROVIDER"] == IbmKeyProtectKMSProvider {
+			} else if kmsProviderName == IbmKeyProtectKMSProvider || kmsProviderName == ThalesKMSProvider {
 				// Secret is created by UI in "openshift-storage" namespace
-				nb.Spec.Security.KeyManagementService.TokenSecretName = kmsConfig.Data["IBM_KP_SECRET_NAME"]
+				nb.Spec.Security.KeyManagementService.TokenSecretName = kmsConfig.Data[kmsProviderSecretKeyMap[kmsProviderName]]
 			}
 			nb.Spec.Security.KeyManagementService.ConnectionDetails = kmsConfig.Data
 		}

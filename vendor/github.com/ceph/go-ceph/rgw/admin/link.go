@@ -1,6 +1,3 @@
-//go:build ceph_preview
-// +build ceph_preview
-
 package admin
 
 import (
@@ -17,7 +14,6 @@ type BucketLinkInput struct {
 
 // UnlinkBucket unlink a bucket from a specified user
 // Primarily useful for changing bucket ownership.
-//  PREVIEW
 func (api *API) UnlinkBucket(ctx context.Context, link BucketLinkInput) error {
 	if link.UID == "" {
 		return errMissingUserID
@@ -31,7 +27,6 @@ func (api *API) UnlinkBucket(ctx context.Context, link BucketLinkInput) error {
 
 // LinkBucket will link a bucket to a specified user
 // unlinking the bucket from any previous user
-//  PREVIEW
 func (api *API) LinkBucket(ctx context.Context, link BucketLinkInput) error {
 	if link.UID == "" {
 		return errMissingUserID
