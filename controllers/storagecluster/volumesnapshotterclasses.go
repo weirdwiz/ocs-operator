@@ -10,7 +10,7 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	ocsv1 "github.com/red-hat-storage/ocs-operator/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -23,6 +23,7 @@ type ocsSnapshotClass struct{}
 const (
 	rbdSnapshotter    SnapshotterType = "rbd"
 	cephfsSnapshotter SnapshotterType = "cephfs"
+	nfsSnapshotter    SnapshotterType = "nfs"
 )
 
 // secret name and namespace for snapshotter class
@@ -39,7 +40,7 @@ type SnapshotClassConfiguration struct {
 }
 
 // newVolumeSnapshotClass returns a new VolumeSnapshotter class backed by provided snapshotter type
-// available 'snapShotterType' values are 'rbd' and 'cephfs'
+// available 'snapShotterType' values are 'rbd','cephfs' and 'cephnfs'
 func newVolumeSnapshotClass(instance *ocsv1.StorageCluster, snapShotterType SnapshotterType) *snapapi.VolumeSnapshotClass {
 	retSC := &snapapi.VolumeSnapshotClass{
 		ObjectMeta: metav1.ObjectMeta{
@@ -72,11 +73,20 @@ func newCephBlockPoolSnapshotClassConfiguration(instance *ocsv1.StorageCluster) 
 	}
 }
 
+func newCephNetworkFilesystemSnapshotClassConfiguration(instance *ocsv1.StorageCluster) SnapshotClassConfiguration {
+	return SnapshotClassConfiguration{
+		snapshotClass: newVolumeSnapshotClass(instance, nfsSnapshotter),
+	}
+}
+
 // newSnapshotClassConfigurations generates configuration options for Ceph SnapshotClasses.
 func newSnapshotClassConfigurations(instance *ocsv1.StorageCluster) []SnapshotClassConfiguration {
 	vsccs := []SnapshotClassConfiguration{
 		newCephFilesystemSnapshotClassConfiguration(instance),
 		newCephBlockPoolSnapshotClassConfiguration(instance),
+	}
+	if instance.Spec.NFS != nil && instance.Spec.NFS.Enable {
+		vsccs = append(vsccs, newCephNetworkFilesystemSnapshotClassConfiguration(instance))
 	}
 	return vsccs
 }
@@ -113,7 +123,7 @@ func (r *StorageClusterReconciler) createSnapshotClasses(vsccs []SnapshotClassCo
 		if existing.DeletionTimestamp != nil {
 			return fmt.Errorf("failed to restore SnapshotClass %q because it is marked for deletion", existing.Name)
 		}
-		// if there is a mis-match in the parameters of existing vs created resources,
+		// if there is a mismatch in the parameters of existing vs created resources,
 		if !reflect.DeepEqual(vsc.Parameters, existing.Parameters) {
 			// we have to update the existing SnapshotClass
 			r.Log.Info("SnapshotClass needs to be updated", "SnapshotClass", klog.KRef(existing.Namespace, existing.Name))
@@ -131,10 +141,6 @@ func (r *StorageClusterReconciler) createSnapshotClasses(vsccs []SnapshotClassCo
 // ensureCreated functions ensures that snpashotter classes are created
 func (obj *ocsSnapshotClass) ensureCreated(r *StorageClusterReconciler, instance *ocsv1.StorageCluster) (reconcile.Result, error) {
 
-	if IsOCSConsumerMode(instance) {
-		return reconcile.Result{}, nil
-	}
-
 	vsccs := newSnapshotClassConfigurations(instance)
 
 	err := r.createSnapshotClasses(vsccs)
@@ -147,10 +153,6 @@ func (obj *ocsSnapshotClass) ensureCreated(r *StorageClusterReconciler, instance
 
 // ensureDeleted deletes the SnapshotClasses that the ocs-operator created
 func (obj *ocsSnapshotClass) ensureDeleted(r *StorageClusterReconciler, instance *ocsv1.StorageCluster) (reconcile.Result, error) {
-
-	if IsOCSConsumerMode(instance) {
-		return reconcile.Result{}, nil
-	}
 
 	vsccs := newSnapshotClassConfigurations(instance)
 	for _, vscc := range vsccs {

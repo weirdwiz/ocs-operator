@@ -25,7 +25,10 @@ func RegisterCustomResourceCollectors(registry *prometheus.Registry, opts *optio
 	cephObjectStoreCollector := NewCephObjectStoreCollector(opts)
 	cephBlockPoolCollector := NewCephBlockPoolCollector(opts)
 	cephClusterCollector := NewCephClusterCollector(opts)
+	storageClusterCollector := NewStorageClusterCollector(opts)
 	OBMetricsCollector := NewObjectBucketCollector(opts)
+	clusterAdvanceFeatureCollector := NewClusterAdvancedFeatureCollector(opts)
+	storageConsumerCollector := NewStorageConsumerCollector(opts)
 	cephObjectStoreCollector.Run(opts.StopCh)
 	cephBlockPoolCollector.Run(opts.StopCh)
 	cephClusterCollector.Run(opts.StopCh)
@@ -36,15 +39,28 @@ func RegisterCustomResourceCollectors(registry *prometheus.Registry, opts *optio
 		cephClusterCollector,
 		OBMetricsCollector,
 	)
+	if clusterAdvanceFeatureCollector != nil {
+		clusterAdvanceFeatureCollector.Run(opts.StopCh)
+		registry.MustRegister(clusterAdvanceFeatureCollector)
+	}
+	if storageConsumerCollector != nil {
+		storageConsumerCollector.Run(opts.StopCh)
+		registry.MustRegister(storageConsumerCollector)
+	}
+	if storageClusterCollector != nil {
+		storageClusterCollector.Run(opts.StopCh)
+		registry.MustRegister(storageClusterCollector)
+	}
 }
 
 var pvStoreEnabled bool
-var pvStore = internalcache.NewPersistentVolumeStore()
+var pvStore *internalcache.PersistentVolumeStore
 
 func enablePVStore(opts *options.Options) {
+	pvStore = internalcache.NewPersistentVolumeStore(opts)
 	client := clientset.NewForConfigOrDie(opts.Kubeconfig)
 	lw := internalcache.CreatePersistentVolumeListWatch(client, "")
-	reflector := cache.NewReflector(lw, &corev1.PersistentVolume{}, pvStore, 0)
+	reflector := cache.NewReflector(lw, &corev1.PersistentVolume{}, pvStore, 2*time.Minute)
 	go reflector.Run(opts.StopCh)
 	pvStoreEnabled = true
 }
@@ -59,6 +75,16 @@ func enableRBDMirrorStore(opts *options.Options) {
 	reflector := cache.NewReflector(lw, &cephv1.CephBlockPool{}, rbdMirrorStore, 30*time.Second)
 	go reflector.Run(opts.StopCh)
 	rbdMirrorStoreEnabled = true
+}
+
+var cephBlocklistStore *internalcache.CephBlocklistStore
+
+func enableCephBlocklistMirrorStore(opts *options.Options) {
+	cephBlocklistStore = internalcache.NewCephBlocklistStore(opts)
+	rookClient := rookclient.NewForConfigOrDie(opts.Kubeconfig)
+	lw := internalcache.CreateCephBlockPoolListWatch(rookClient, corev1.NamespaceAll, "")
+	reflector := cache.NewReflector(lw, &cephv1.CephBlockPool{}, cephBlocklistStore, 30*time.Second)
+	go reflector.Run(opts.StopCh)
 }
 
 // RegisterPersistentVolumeAttributesCollector registers PV attribute colletor to registry
@@ -80,4 +106,10 @@ func RegisterRBDMirrorCollector(registry *prometheus.Registry, opts *options.Opt
 	}
 	rbdMirrorCollector := NewRBDMirrorCollector(rbdMirrorStore, pvStore, opts)
 	registry.MustRegister(rbdMirrorCollector)
+}
+
+func RegisterCephBlocklistCollector(registry *prometheus.Registry, opts *options.Options) {
+	enableCephBlocklistMirrorStore(opts)
+	blocklistCollector := NewCephBlocklistCollector(cephBlocklistStore, pvStore, opts)
+	registry.MustRegister(blocklistCollector)
 }

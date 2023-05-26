@@ -14,6 +14,9 @@ rules:
   - ""
   resources:
   - persistentvolumes
+  - persistentvolumeclaims
+  - nodes
+  - pods
   - configmaps
   - secrets
   verbs:
@@ -26,6 +29,7 @@ rules:
   - cephobjectstores
   - cephclusters
   - cephblockpools
+  - cephrbdmirrors
   verbs:
     - get
     - list
@@ -52,6 +56,23 @@ rules:
   verbs:
     - get
     - list
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+    - get
+    - list
+    - watch
+- apiGroups:
+  - ocs.openshift.io
+  resources:
+  - storageconsumers
+  - storageclusters
+  verbs:
+    - get
+    - list
+    - watch
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

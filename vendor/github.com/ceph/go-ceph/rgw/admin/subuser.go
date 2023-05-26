@@ -1,6 +1,3 @@
-//go:build ceph_preview
-// +build ceph_preview
-
 package admin
 
 import (
@@ -41,7 +38,6 @@ func makeInvalidSubuserAccessLevelError(spec SubuserSpec) error {
 // gracefully).
 
 // CreateSubuser - https://docs.ceph.com/en/latest/radosgw/adminops/#create-subuser
-//  PREVIEW
 func (api *API) CreateSubuser(ctx context.Context, user User, subuser SubuserSpec) error {
 	if user.ID == "" {
 		return errMissingUserID
@@ -64,7 +60,6 @@ func (api *API) CreateSubuser(ctx context.Context, user User, subuser SubuserSpe
 }
 
 // RemoveSubuser - https://docs.ceph.com/en/latest/radosgw/adminops/#remove-subuser
-//  PREVIEW
 func (api *API) RemoveSubuser(ctx context.Context, user User, subuser SubuserSpec) error {
 	if user.ID == "" {
 		return errMissingUserID
@@ -84,7 +79,6 @@ func (api *API) RemoveSubuser(ctx context.Context, user User, subuser SubuserSpe
 }
 
 // ModifySubuser - https://docs.ceph.com/en/latest/radosgw/adminops/#modify-subuser
-//  PREVIEW
 func (api *API) ModifySubuser(ctx context.Context, user User, subuser SubuserSpec) error {
 	if user.ID == "" {
 		return errMissingUserID

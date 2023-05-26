@@ -57,12 +57,12 @@ func (r *StorageClusterReconciler) getStorageClusterEligibleNodes(sc *ocsv1.Stor
 	return nodes, err
 }
 
-// getFailureDomain returns the failure domain that was determined at the time of node topology reconcilation
+// getFailureDomain returns the failure domain that was determined at the time of node topology reconciliation
 func getFailureDomain(sc *ocsv1.StorageCluster) string {
 	return sc.Status.FailureDomain
 }
 
-// getFailureDomainKey returns the failure domain key that was determined at the time of node topology reconcilation
+// getFailureDomainKey returns the failure domain key that was determined at the time of node topology reconciliation
 func getFailureDomainKey(sc *ocsv1.StorageCluster) string {
 	return sc.Status.FailureDomainKey
 }
@@ -276,10 +276,7 @@ func (r *StorageClusterReconciler) reconcileNodeTopologyMap(sc *ocsv1.StorageClu
 		return err
 	}
 
-	if sc.Status.NodeTopologies == nil || sc.Status.NodeTopologies.Labels == nil {
-		sc.Status.NodeTopologies = ocsv1.NewNodeTopologyMap()
-	}
-	topologyMap := sc.Status.NodeTopologies
+	topologyMap := ocsv1.NewNodeTopologyMap()
 	nodeRacks := ocsv1.NewNodeTopologyMap()
 
 	r.nodeCount = len(nodes.Items)
@@ -309,6 +306,8 @@ func (r *StorageClusterReconciler) reconcileNodeTopologyMap(sc *ocsv1.StorageClu
 	}
 
 	filterDuplicateLabels(sc, nodes, topologyMap)
+	sortTopologyMapLabelValues(topologyMap)
+	sc.Status.NodeTopologies = topologyMap
 	setFailureDomain(sc)
 
 	if getFailureDomain(sc) == "rack" {
@@ -319,6 +318,14 @@ func (r *StorageClusterReconciler) reconcileNodeTopologyMap(sc *ocsv1.StorageClu
 	}
 
 	return nil
+}
+
+// A function to sort the values of a label in the topology map
+func sortTopologyMapLabelValues(topologyMap *ocsv1.NodeTopologyMap) {
+	for label, values := range topologyMap.Labels {
+		sort.Strings(values)
+		topologyMap.Labels[label] = values
+	}
 }
 
 // nodesHaveIdenticalValuesForKeys will return true only if
@@ -350,7 +357,7 @@ func nodesHaveIdenticalValuesForKeys(nodes *corev1.NodeList, keys []string) bool
 }
 
 // filterDuplicateLabels modifies the topologyMap such that valid but redundant
-// labels are removed from it. The logic of determing which labels are redundant
+// labels are removed from it. The logic of determining which labels are redundant
 // should be all within this function.
 func filterDuplicateLabels(sc *ocsv1.StorageCluster, nodes *corev1.NodeList, topologyMap *ocsv1.NodeTopologyMap) {
 

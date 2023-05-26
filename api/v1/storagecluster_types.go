@@ -48,6 +48,7 @@ type StorageClusterSpec struct {
 	StorageDeviceSets  []StorageDeviceSet                     `json:"storageDeviceSets,omitempty"`
 	MonPVCTemplate     *corev1.PersistentVolumeClaim          `json:"monPVCTemplate,omitempty"`
 	MonDataDirHostPath string                                 `json:"monDataDirHostPath,omitempty"`
+	Mgr                *MgrSpec                               `json:"mgr,omitempty"`
 	MultiCloudGateway  *MultiCloudGatewaySpec                 `json:"multiCloudGateway,omitempty"`
 	NFS                *NFSSpec                               `json:"nfs,omitempty"`
 	// Monitoring controls the configuration of resources for exposing OCS metrics
@@ -94,6 +95,51 @@ type StorageClusterSpec struct {
 	// +optional
 	// +nullable
 	LogCollector *rookCephv1.LogCollectorSpec `json:"logCollector,omitempty"`
+
+	// BackingStorageClasses is a list of storage classes that will be
+	// provisioned by the storagecluster controller to be used in
+	// storageDeviceSets section of the CR.
+	BackingStorageClasses []BackingStorageClass `json:"backingStorageClasses,omitempty"`
+	// DefaultStorageProfile is the default storage profile to use for
+	// the storageclassrequest as StorageProfile is optional.
+	DefaultStorageProfile string `json:"defaultStorageProfile,omitempty"`
+
+	StorageProfiles []StorageProfile `json:"storageProfiles,omitempty"`
+}
+
+// StorageProfile is the storage profile to use for the storageclassrequest.
+type StorageProfile struct {
+	// +kubebuilder:validation:Required
+	// Name of the storage profile.
+	Name string `json:"name"`
+	// +kubebuilder:validation:Required
+	// DeviceClass is the deviceclass name.
+	DeviceClass string `json:"deviceClass"`
+	// configurations to use for cephfilesystem.
+	SharedFilesystemConfiguration SharedFilesystemConfigurationSpec `json:"sharedFilesystemConfiguration,omitempty"`
+	// configurations to use for  profile specific blockpool.
+	BlockPoolConfiguration BlockPoolConfigurationSpec `json:"blockPoolConfiguration,omitempty"`
+}
+
+type SharedFilesystemConfigurationSpec struct {
+	Parameters map[string]string `json:"parameters,omitempty"`
+}
+
+type BlockPoolConfigurationSpec struct {
+	Parameters map[string]string `json:"parameters,omitempty"`
+}
+
+// BackingStorageClass defines the backing storageclass for StorageDeviceSet
+type BackingStorageClass struct {
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	// Provisioner indicates the type of the provisioner.
+	// +optional
+	Provisioner string `json:"provisioner,omitempty"`
+
+	// Parameters holds the parameters for the provisioner that should
+	// create volumes of this storage class.
+	// +optional
+	Parameters map[string]string `json:"parameters,omitempty"`
 }
 
 // KeyManagementServiceSpec provides a way to enable KMS
@@ -104,14 +150,16 @@ type KeyManagementServiceSpec struct {
 
 // ManagedResourcesSpec defines how to reconcile auxiliary resources
 type ManagedResourcesSpec struct {
-	CephCluster          ManageCephCluster          `json:"cephCluster,omitempty"`
-	CephConfig           ManageCephConfig           `json:"cephConfig,omitempty"`
-	CephDashboard        ManageCephDashboard        `json:"cephDashboard,omitempty"`
-	CephBlockPools       ManageCephBlockPools       `json:"cephBlockPools,omitempty"`
-	CephFilesystems      ManageCephFilesystems      `json:"cephFilesystems,omitempty"`
-	CephObjectStores     ManageCephObjectStores     `json:"cephObjectStores,omitempty"`
-	CephObjectStoreUsers ManageCephObjectStoreUsers `json:"cephObjectStoreUsers,omitempty"`
-	CephToolbox          ManageCephToolbox          `json:"cephToolbox,omitempty"`
+	CephCluster           ManageCephCluster           `json:"cephCluster,omitempty"`
+	CephConfig            ManageCephConfig            `json:"cephConfig,omitempty"`
+	CephDashboard         ManageCephDashboard         `json:"cephDashboard,omitempty"`
+	CephBlockPools        ManageCephBlockPools        `json:"cephBlockPools,omitempty"`
+	CephNonResilientPools ManageCephNonResilientPools `json:"cephNonResilientPools,omitempty"`
+	CephFilesystems       ManageCephFilesystems       `json:"cephFilesystems,omitempty"`
+	CephObjectStores      ManageCephObjectStores      `json:"cephObjectStores,omitempty"`
+	CephObjectStoreUsers  ManageCephObjectStoreUsers  `json:"cephObjectStoreUsers,omitempty"`
+	CephToolbox           ManageCephToolbox           `json:"cephToolbox,omitempty"`
+	CephRBDMirror         ManageCephRBDMirror         `json:"cephRBDMirror,omitempty"`
 }
 
 // ManageCephCluster defines how to reconcile the Ceph cluster definition
@@ -138,6 +186,13 @@ type ManageCephBlockPools struct {
 	DisableSnapshotClass bool   `json:"disableSnapshotClass,omitempty"`
 }
 
+// ManageCephNonResilientPools defines how to reconcile ceph non-resilient pools
+type ManageCephNonResilientPools struct {
+	Enable bool `json:"enable,omitempty"`
+	// ReconcileStrategy and other related fields are not used for now
+	// They can be added once the feature goes to GA
+}
+
 // ManageCephFilesystems defines how to reconcile CephFilesystems
 type ManageCephFilesystems struct {
 	ReconcileStrategy    string `json:"reconcileStrategy,omitempty"`
@@ -158,13 +213,21 @@ type ManageCephObjectStoreUsers struct {
 	ReconcileStrategy string `json:"reconcileStrategy,omitempty"`
 }
 
+// ManageCephToolbox defines how to reconcile Ceph toolbox
 type ManageCephToolbox struct {
-	ReconcileStrategy string `json:"reconcileStrategy,omitempty"` // default behavior here is effectively `ignore`
+	ReconcileStrategy string `json:"reconcileStrategy,omitempty"`
+}
 
-	// Tolerations if specified set toolbox ceph tools pod tolerations
-	// Defaults to empty
-	// +optional
-	Tolerations []corev1.Toleration `json:"cephTolerations,omitempty"`
+// ManageCephRBDMirror defines how to reconcile Ceph RBDMirror
+type ManageCephRBDMirror struct {
+	ReconcileStrategy string `json:"reconcileStrategy,omitempty"`
+}
+
+// MgrSpec defines the settings for the Ceph Manager
+type MgrSpec struct {
+	// EnableActivePassive can be set as true to deploy 2 ceph manager pods, one active and one standby
+	// Ceph will promote the standby mgr when the active mgr goes down due to any reason
+	EnableActivePassive bool `json:"enableActivePassive,omitempty"`
 }
 
 // ExternalStorageKind specifies a kind of the external storage
@@ -183,30 +246,6 @@ const (
 type ExternalStorageClusterSpec struct {
 	// +optional
 	Enable bool `json:"enable,omitempty"`
-
-	//+kubebuilder:validation:Enum=ocs;rhcs
-	// StorageProviderKind Identify the type of storage provider cluster this consumer cluster is going to connect to.
-	StorageProviderKind ExternalStorageKind `json:"storageProviderKind,omitempty"`
-
-	// StorageProviderEndpoint holds info to establish connection with the storage providing cluster.
-	StorageProviderEndpoint string `json:"storageProviderEndpoint,omitempty"`
-
-	// OnboardingTicket holds an identity information required for consumer to onboard.
-	OnboardingTicket string `json:"onboardingTicket,omitempty"`
-
-	// RequestedCapacity Will define the desired capacity requested by a consumer cluster.
-	RequestedCapacity *resource.Quantity `json:"requestedCapacity,omitempty"`
-}
-
-// ExternalStorageClusterStatus defines the status of the external Storage Cluster
-// to be connected to the local cluster
-type ExternalStorageClusterStatus struct {
-	// GrantedCapacity Will report the actual capacity
-	// granted to the consumer cluster by the provider cluster.
-	GrantedCapacity resource.Quantity `json:"grantedCapacity,omitempty"`
-
-	// ConsumerID will hold the identity of this cluster inside the attached provider cluster
-	ConsumerID string `json:"id,omitempty"`
 }
 
 // StorageDeviceSet defines a set of storage devices.
@@ -300,6 +339,11 @@ type MultiCloudGatewaySpec struct {
 	// deployment.
 	// +optional
 	Endpoints *nbv1.EndpointsSpec `json:"endpoints,omitempty"`
+
+	// DisableLoadBalancerService (optional) sets the service type to ClusterIP instead of LoadBalancer
+	// +nullable
+	// +optional
+	DisableLoadBalancerService bool `json:"disableLoadBalancerService,omitempty"`
 }
 
 // NFSSpec defines specific nfs configuration options
@@ -398,9 +442,6 @@ type StorageClusterStatus struct {
 	// ExternalSecretHash holds the checksum value of external secret data.
 	ExternalSecretHash string `json:"externalSecretHash,omitempty"`
 
-	// ExternalStorage shows the status of the external cluster
-	ExternalStorage ExternalStorageClusterStatus `json:"externalStorage,omitempty"`
-
 	// Images holds the image reconcile status for all images reconciled by the operator
 	Images ImagesStatus `json:"images,omitempty"`
 
@@ -454,6 +495,10 @@ const (
 	// ConditionExternalClusterConnecting type indicates that rook is still trying for
 	// an external connection
 	ConditionExternalClusterConnecting conditionsv1.ConditionType = "ExternalClusterConnecting"
+
+	// ConditionVersionMismatch type indicates that there is a mismatch in the storagecluster
+	// and the operator version
+	ConditionVersionMismatch conditionsv1.ConditionType = "VersionMismatch"
 )
 
 // List of constants to show different different reconciliation messages and statuses.
@@ -473,8 +518,9 @@ const (
 // +kubebuilder:printcolumn:name="External",type=boolean,JSONPath=.spec.externalStorage.enable,description="External Storage Cluster"
 // +kubebuilder:printcolumn:name="Created At",type=string,JSONPath=.metadata.creationTimestamp
 // +kubebuilder:printcolumn:name="Version",type=string,JSONPath=.status.version,description="Storage Cluster Version"
+// +operator-sdk:csv:customresourcedefinitions:displayName="Storage Cluster",resources={{CephCluster,v1,cephclusters.ceph.rook.io},{NooBaa,v1alpha1,noobaas.noobaa.io}}
 
-// StorageCluster is the Schema for the storageclusters API
+// StorageCluster represents a cluster including Ceph Cluster, NooBaa and all the storage and compute resources required.
 type StorageCluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

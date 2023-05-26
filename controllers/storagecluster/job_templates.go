@@ -49,6 +49,7 @@ func (obj *ocsJobTemplates) ensureCreated(r *StorageClusterReconciler, sc *ocsv1
 	for _, tempFunc := range tempFuncs {
 		template := tempFunc(sc)
 		_, err := controllerutil.CreateOrUpdate(context.TODO(), r.Client, template, func() error {
+			template := tempFunc(sc)
 			return controllerutil.SetControllerReference(sc, template, r.Scheme)
 		})
 
@@ -123,7 +124,7 @@ func extendClusterTemplate(sc *ocsv1.StorageCluster) *openshiftv1.Template {
 				Required:    false,
 				Description: `
 				 Currently this design does not require any parameter yet,
-				 included for an additional possiblity to implement something like
+				 included for an additional possibility to implement something like
 				 --increase-limit and --reset-limit`,
 			},
 		},
@@ -163,7 +164,7 @@ func newExtendClusterJob(sc *ocsv1.StorageCluster, jobTemplateName string, cephC
 					InitContainers: []corev1.Container{
 						{
 							Name:            "config-init",
-							Image:           "rook/ceph:master",
+							Image:           os.Getenv("ROOK_CEPH_IMAGE"),
 							Command:         []string{"/usr/local/bin/toolbox.sh"},
 							Args:            []string{"--skip-watch"},
 							ImagePullPolicy: "IfNotPresent",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
@@ -54,7 +55,7 @@ func TestEnsureCephCluster(t *testing.T) {
 			cephClusterState: cephv1.ClusterStateError,
 		},
 		{
-			label:            "CephCluster reconciled succesfully",
+			label:            "CephCluster reconciled successfully",
 			cephClusterState: cephv1.ClusterStateCreated,
 		},
 		{
@@ -77,7 +78,6 @@ func TestEnsureCephCluster(t *testing.T) {
 
 		expected, err := newCephCluster(mockStorageCluster.DeepCopy(), "", 3, reconciler.serverVersion, nil, log)
 		assert.NilError(t, err)
-		expected.ObjectMeta.SelfLink = "/api/v1/namespaces/ceph/secrets/pvc-ceph-client-key"
 		expected.Status.State = c.cephClusterState
 
 		if !c.shouldCreate {
@@ -528,6 +528,8 @@ func TestKMSConfigChanges(t *testing.T) {
 		// backward compatible test
 		{testLabel: "case 7", kmsProvider: VaultKMSProvider,
 			enabled: true, kmsAddress: "http://localhost:5678", authMethod: VaultSAAuthMethod},
+		{testLabel: "case 8", kmsProvider: ThalesKMSProvider,
+			clusterWideEncryption: true, kmsAddress: "http://localhost:5671"},
 	}
 	for _, kmsArgs := range validKMSArgs {
 		t.Run(kmsArgs.testLabel, func(t *testing.T) {
@@ -598,6 +600,8 @@ func assertCephClusterKMSConfiguration(t *testing.T, kmsArgs struct {
 		}
 		if kmsArgs.authMethod == VaultTokenAuthMethod {
 			assert.Equal(t, KMSTokenSecretName, cephCluster.Spec.Security.KeyManagementService.TokenSecretName, "Failed: %q. Expected the token-names tobe same", kmsArgs.testLabel)
+		} else if kmsArgs.kmsProvider == IbmKeyProtectKMSProvider || kmsArgs.kmsProvider == ThalesKMSProvider {
+			assert.Equal(t, kmsCM.Data[kmsProviderSecretKeyMap[kmsArgs.kmsProvider]], cephCluster.Spec.Security.KeyManagementService.TokenSecretName, "Failed: %q. Expected the token-names tobe same", kmsArgs.testLabel)
 		}
 	}
 }
@@ -808,6 +812,35 @@ func TestParsePrometheusRules(t *testing.T) {
 	assert.Equal(t, 1, len(prometheusRules.Spec.Groups))
 }
 
+func TestChangePrometheusExprFunc(t *testing.T) {
+	prometheusRules, err := parsePrometheusRule(localPrometheusRules)
+	assert.NilError(t, err)
+	var changeTokens = []exprReplaceToken{
+		{recordOrAlertName: "CephMgrIsAbsent", wordInExpr: "openshift-storage", replaceWith: "new-namespace"},
+		// when alert or record name is not specified,
+		// the change should affect all the expressions which has the 'wordInExpr'
+		{recordOrAlertName: "", wordInExpr: "ceph_pool_stored_raw", replaceWith: "new_ceph_pool_stored_raw"},
+	}
+	changePromRuleExpr(prometheusRules, changeTokens)
+	alertNameAndChangedExpr := [][2]string{
+		{"CephMgrIsAbsent", "new-namespace"},
+		{"CephPoolQuotaBytesNearExhaustion", "new_ceph_pool_stored_raw"},
+		{"CephPoolQuotaBytesCriticallyExhausted", "new_ceph_pool_stored_raw"},
+	}
+	for _, grp := range prometheusRules.Spec.Groups {
+		for _, rule := range grp.Rules {
+			for _, eachAlertChanged := range alertNameAndChangedExpr {
+				alertName := eachAlertChanged[0]
+				changeStr := eachAlertChanged[1]
+				if rule.Alert != alertName {
+					continue
+				}
+				assert.Assert(t, strings.Contains(rule.Expr.String(), changeStr))
+			}
+		}
+	}
+}
+
 func TestGetNetworkSpec(t *testing.T) {
 	testTable := []struct {
 		desc     string
@@ -821,6 +854,9 @@ func TestGetNetworkSpec(t *testing.T) {
 			},
 			expected: cephv1.NetworkSpec{
 				HostNetwork: true,
+				Connections: &cephv1.ConnectionsSpec{
+					RequireMsgr2: true,
+				},
 			},
 		},
 		{
@@ -830,6 +866,9 @@ func TestGetNetworkSpec(t *testing.T) {
 			},
 			expected: cephv1.NetworkSpec{
 				HostNetwork: false,
+				Connections: &cephv1.ConnectionsSpec{
+					RequireMsgr2: true,
+				},
 			},
 		},
 		{
@@ -844,6 +883,9 @@ func TestGetNetworkSpec(t *testing.T) {
 			expected: cephv1.NetworkSpec{
 				HostNetwork: true,
 				IPFamily:    cephv1.IPv6,
+				Connections: &cephv1.ConnectionsSpec{
+					RequireMsgr2: true,
+				},
 			},
 		},
 		{
@@ -860,6 +902,9 @@ func TestGetNetworkSpec(t *testing.T) {
 				HostNetwork: true,
 				IPFamily:    cephv1.IPv6,
 				DualStack:   true,
+				Connections: &cephv1.ConnectionsSpec{
+					RequireMsgr2: true,
+				},
 			},
 		},
 		{
@@ -874,12 +919,19 @@ func TestGetNetworkSpec(t *testing.T) {
 			expected: cephv1.NetworkSpec{
 				HostNetwork: false,
 				IPFamily:    cephv1.IPv4,
+				Connections: &cephv1.ConnectionsSpec{
+					RequireMsgr2: true,
+				},
 			},
 		},
 		{
-			desc:     "hostNetwork unspecified, network unspecified",
-			scSpec:   ocsv1.StorageClusterSpec{},
-			expected: cephv1.NetworkSpec{},
+			desc:   "hostNetwork unspecified, network unspecified",
+			scSpec: ocsv1.StorageClusterSpec{},
+			expected: cephv1.NetworkSpec{
+				Connections: &cephv1.ConnectionsSpec{
+					RequireMsgr2: true,
+				},
+			},
 		},
 		{
 			desc: "hostNetwork unspecified, network specified",
@@ -892,6 +944,9 @@ func TestGetNetworkSpec(t *testing.T) {
 			expected: cephv1.NetworkSpec{
 				HostNetwork: true,
 				IPFamily:    cephv1.IPv4,
+				Connections: &cephv1.ConnectionsSpec{
+					RequireMsgr2: true,
+				},
 			},
 		},
 	}
@@ -996,4 +1051,145 @@ func TestLogCollector(t *testing.T) {
 	actual, err = newCephCluster(sc, "", 3, r.serverVersion, nil, log)
 	assert.NilError(t, err)
 	assert.DeepEqual(t, actual.Spec.LogCollector.MaxLogSize, &maxLogSize)
+}
+
+func TestCephClusterNetworkConnectionsSpec(t *testing.T) {
+	testTable := []struct {
+		desc   string
+		scSpec ocsv1.StorageClusterSpec
+		ccSpec cephv1.ClusterSpec
+	}{
+		{
+			desc: "No Network Connections Spec is defined in StorageCluster",
+			scSpec: ocsv1.StorageClusterSpec{
+				Network: &cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{},
+				},
+			},
+			ccSpec: cephv1.ClusterSpec{
+				Network: cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{},
+				},
+			},
+		},
+		{
+			desc: "Encryption Enabled is true",
+			scSpec: ocsv1.StorageClusterSpec{
+				Network: &cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{
+						Encryption: &cephv1.EncryptionSpec{
+							Enabled: true,
+						},
+					},
+				},
+			},
+			ccSpec: cephv1.ClusterSpec{
+				Network: cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{
+						Encryption: &cephv1.EncryptionSpec{
+							Enabled: true,
+						},
+					},
+				},
+			},
+		},
+		{
+			desc: "Compression is enabled",
+			scSpec: ocsv1.StorageClusterSpec{
+				Network: &cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{
+						Compression: &cephv1.CompressionSpec{
+							Enabled: true,
+						},
+					},
+				},
+			},
+			ccSpec: cephv1.ClusterSpec{
+				Network: cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{
+						Compression: &cephv1.CompressionSpec{
+							Enabled: true,
+						},
+					},
+				},
+			},
+		},
+		{
+			desc: "Encryption Enabled is true, Compression Enabled is true",
+			scSpec: ocsv1.StorageClusterSpec{
+				Network: &cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{
+						Encryption: &cephv1.EncryptionSpec{
+							Enabled: true,
+						},
+						Compression: &cephv1.CompressionSpec{
+							Enabled: true,
+						},
+					},
+				},
+			},
+			ccSpec: cephv1.ClusterSpec{
+				Network: cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{
+						Encryption: &cephv1.EncryptionSpec{
+							Enabled: true,
+						},
+						Compression: &cephv1.CompressionSpec{
+							Enabled: true,
+						},
+					},
+				},
+			},
+		},
+		{
+			desc: "Encryption Enabled is false, Compression Enabled is false",
+			scSpec: ocsv1.StorageClusterSpec{
+				Network: &cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{
+						Encryption: &cephv1.EncryptionSpec{
+							Enabled: false,
+						},
+						Compression: &cephv1.CompressionSpec{
+							Enabled: false,
+						},
+					},
+				},
+			},
+			ccSpec: cephv1.ClusterSpec{
+				Network: cephv1.NetworkSpec{
+					Connections: &cephv1.ConnectionsSpec{
+						Encryption: &cephv1.EncryptionSpec{
+							Enabled: false,
+						},
+						Compression: &cephv1.CompressionSpec{
+							Enabled: false,
+						},
+					},
+				},
+			},
+		},
+	}
+	// Test for external mode
+	for _, testCase := range testTable {
+		t.Logf("Test for external mode")
+		t.Logf("Case: %q\n", testCase.desc)
+		sc := &ocsv1.StorageCluster{}
+		mockStorageCluster.DeepCopyInto(sc)
+		sc.Spec.Network = testCase.scSpec.Network
+		sc.Spec.ExternalStorage.Enable = true
+		cc := newExternalCephCluster(sc, "", "", "")
+		assert.DeepEqual(t, cc.Spec.Network.Connections, testCase.ccSpec.Network.Connections)
+	}
+	// Test for internal mode
+	for _, testCase := range testTable {
+		t.Logf("Test for internal mode")
+		t.Logf("Case: %q\n", testCase.desc)
+		sc := &ocsv1.StorageCluster{}
+		mockStorageCluster.DeepCopyInto(sc)
+		sc.Spec.Network = testCase.scSpec.Network
+		reconciler := createFakeStorageClusterReconciler(t)
+		testCase.ccSpec.Network.Connections.RequireMsgr2 = true
+		cc, _ := newCephCluster(sc, "", 3, reconciler.serverVersion, nil, log)
+		assert.DeepEqual(t, cc.Spec.Network.Connections, testCase.ccSpec.Network.Connections)
+	}
 }

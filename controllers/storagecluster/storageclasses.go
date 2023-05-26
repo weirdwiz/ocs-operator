@@ -2,6 +2,7 @@ package storagecluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -15,7 +16,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+)
+
+const (
+	storageClassSkippedError = "some StorageClasses were skipped while waiting for pre-requisites to be met"
 )
 
 // StorageClassConfiguration provides configuration options for a StorageClass.
@@ -97,9 +103,38 @@ func (r *StorageClusterReconciler) createStorageClasses(sccs []StorageClassConfi
 			err := r.Client.Get(context.TODO(), key, &cephBlockPool)
 			if err != nil || cephBlockPool.Status == nil || cephBlockPool.Status.Phase != cephv1.ConditionType(util.PhaseReady) {
 				r.Log.Info("Waiting for CephBlockPool to be Ready. Skip reconciling StorageClass",
-					"CephBlockPool", klog.KRef(key.Name, key.Namespace),
+					"CephBlockPool", klog.KRef(key.Namespace, key.Name),
 					"StorageClass", klog.KRef("", sc.Name),
 				)
+				skippedSC = append(skippedSC, sc.Name)
+				continue
+			}
+		case strings.Contains(sc.Name, "-ceph-non-resilient-rbd") && !scc.isClusterExternal:
+			// wait for CephBlockPools to be ready
+			cephBlockPools := cephv1.CephBlockPoolList{}
+			err := r.Client.List(context.TODO(), &cephBlockPools, client.InNamespace(sc.Parameters["clusterID"]))
+			if err != nil {
+				skippedSC = append(skippedSC, sc.Name)
+				continue
+			}
+			num := strings.Count(sc.Parameters["topologyConstrainedPools"], "poolName")
+			var counter = 0
+			// Waiting for all the non-resilient cephblockpools to be ready
+			for _, cephBlockPool := range cephBlockPools.Items {
+				// Do not count the default cephblockpools
+				if cephBlockPool.Spec.DeviceClass == "" || cephBlockPool.Spec.DeviceClass == "replicated" {
+					continue
+				}
+				if cephBlockPool.Status != nil && cephBlockPool.Status.Phase == cephv1.ConditionType(util.PhaseReady) {
+					counter++
+				} else {
+					r.Log.Info("Waiting for Non-resilient CephBlockPools to be Ready. Skip reconciling StorageClass",
+						"CephBlockPool", klog.KRef(cephBlockPool.Namespace, cephBlockPool.Name),
+						"StorageClass", klog.KRef("", sc.Name),
+					)
+				}
+			}
+			if counter < num {
 				skippedSC = append(skippedSC, sc.Name)
 				continue
 			}
@@ -110,7 +145,7 @@ func (r *StorageClusterReconciler) createStorageClasses(sccs []StorageClassConfi
 			err := r.Client.Get(context.TODO(), key, &cephFilesystem)
 			if err != nil || cephFilesystem.Status == nil || cephFilesystem.Status.Phase != cephv1.ConditionType(util.PhaseReady) {
 				r.Log.Info("Waiting for CephFilesystem to be Ready. Skip reconciling StorageClass",
-					"CephFilesystem", klog.KRef(key.Name, key.Namespace),
+					"CephFilesystem", klog.KRef(key.Namespace, key.Name),
 					"StorageClass", klog.KRef("", sc.Name),
 				)
 				skippedSC = append(skippedSC, sc.Name)
@@ -123,7 +158,7 @@ func (r *StorageClusterReconciler) createStorageClasses(sccs []StorageClassConfi
 			err := r.Client.Get(context.TODO(), key, &cephNFS)
 			if err != nil || cephNFS.Status == nil || cephNFS.Status.Phase != util.PhaseReady {
 				r.Log.Info("Waiting for CephNFS to be Ready. Skip reconciling StorageClass",
-					"CephNFS", klog.KRef(key.Name, key.Namespace),
+					"CephNFS", klog.KRef(key.Namespace, key.Name),
 					"StorageClass", klog.KRef("", sc.Name),
 				)
 				skippedSC = append(skippedSC, sc.Name)
@@ -169,7 +204,7 @@ func (r *StorageClusterReconciler) createStorageClasses(sccs []StorageClassConfi
 		}
 	}
 	if len(skippedSC) > 0 {
-		return fmt.Errorf("some StorageClasses [%s] were skipped while waiting for pre-requisites to be met", strings.Join(skippedSC, ","))
+		return fmt.Errorf("%s: [%s]", storageClassSkippedError, strings.Join(skippedSC, ","))
 	}
 	return nil
 }
@@ -245,11 +280,47 @@ func newCephBlockPoolStorageClassConfiguration(initData *ocsv1.StorageCluster) S
 	}
 }
 
-// newCephNFSStorageClassConfiguration generates configuration options for a Ceph Filesystem StorageClass.
+// newNonResilientCephBlockPoolStorageClassConfiguration generates configuration options for a Non-Resilient Ceph Block Pool StorageClass.
+func newNonResilientCephBlockPoolStorageClassConfiguration(initData *ocsv1.StorageCluster) StorageClassConfiguration {
+	persistentVolumeReclaimDelete := corev1.PersistentVolumeReclaimDelete
+	allowVolumeExpansion := true
+	volumeBindingWaitForFirstConsumer := storagev1.VolumeBindingWaitForFirstConsumer
+	return StorageClassConfiguration{
+		storageClass: &storagev1.StorageClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: generateNameForNonResilientCephBlockPoolSC(initData),
+				Annotations: map[string]string{
+					"description": "Ceph Non Resilient Pools : Provides RWO Filesystem volumes, and RWO and RWX Block volumes",
+				},
+			},
+			Provisioner:       fmt.Sprintf("%s.rbd.csi.ceph.com", initData.Namespace),
+			ReclaimPolicy:     &persistentVolumeReclaimDelete,
+			VolumeBindingMode: &volumeBindingWaitForFirstConsumer,
+			// AllowVolumeExpansion is set to true to enable expansion of OCS backed Volumes
+			AllowVolumeExpansion: &allowVolumeExpansion,
+			Parameters: map[string]string{
+				"clusterID":                 initData.Namespace,
+				"pool":                      generateNameForCephBlockPool(initData),
+				"topologyConstrainedPools":  getTopologyConstrainedPools(initData),
+				"imageFeatures":             "layering,deep-flatten,exclusive-lock,object-map,fast-diff",
+				"csi.storage.k8s.io/fstype": "ext4",
+				"imageFormat":               "2",
+				"csi.storage.k8s.io/provisioner-secret-name":            "rook-csi-rbd-provisioner",
+				"csi.storage.k8s.io/provisioner-secret-namespace":       initData.Namespace,
+				"csi.storage.k8s.io/node-stage-secret-name":             "rook-csi-rbd-node",
+				"csi.storage.k8s.io/node-stage-secret-namespace":        initData.Namespace,
+				"csi.storage.k8s.io/controller-expand-secret-name":      "rook-csi-rbd-provisioner",
+				"csi.storage.k8s.io/controller-expand-secret-namespace": initData.Namespace,
+			},
+		},
+		isClusterExternal: initData.Spec.ExternalStorage.Enable,
+	}
+}
+
+// newCephNFSStorageClassConfiguration generates configuration options for a Ceph NFS StorageClass.
 func newCephNFSStorageClassConfiguration(initData *ocsv1.StorageCluster) StorageClassConfiguration {
 	persistentVolumeReclaimDelete := corev1.PersistentVolumeReclaimDelete
-	// VolumeExpansion is not yet supported for nfs.
-	allowVolumeExpansion := false
+	allowVolumeExpansion := true
 	return StorageClassConfiguration{
 		storageClass: &storagev1.StorageClass{
 			ObjectMeta: metav1.ObjectMeta{
@@ -324,6 +395,9 @@ func (r *StorageClusterReconciler) newStorageClassConfigurations(initData *ocsv1
 		newCephFilesystemStorageClassConfiguration(initData),
 		newCephBlockPoolStorageClassConfiguration(initData),
 	}
+	if initData.Spec.ManagedResources.CephNonResilientPools.Enable {
+		ret = append(ret, newNonResilientCephBlockPoolStorageClassConfiguration(initData))
+	}
 	if initData.Spec.NFS != nil && initData.Spec.NFS.Enable {
 		ret = append(ret, newCephNFSStorageClassConfiguration(initData))
 	}
@@ -340,18 +414,50 @@ func (r *StorageClusterReconciler) newStorageClassConfigurations(initData *ocsv1
 	if initData.Spec.Encryption.StorageClass && initData.Spec.Encryption.KeyManagementService.Enable {
 		kmsConfig, err := getKMSConfigMap(KMSConfigMapName, initData, r.Client)
 		if err == nil && kmsConfig != nil {
-			authMethod, found := kmsConfig.Data["VAULT_AUTH_METHOD"]
-			if found && authMethod != VaultTokenAuthMethod {
-				// for 4.10, skipping SC creation for vault SA based kms encryption
-				r.Log.Info("Only vault token based auth method is supported for PV encryption", "VaultAuthMethod", authMethod)
-			} else {
-				serviceName := kmsConfig.Data["KMS_SERVICE_NAME"]
-				ret = append(ret, newEncryptedCephBlockPoolStorageClassConfiguration(initData, serviceName))
-			}
+			serviceName := kmsConfig.Data["KMS_SERVICE_NAME"]
+			ret = append(ret, newEncryptedCephBlockPoolStorageClassConfiguration(initData, serviceName))
 		} else {
 			r.Log.Error(err, "Error while getting ConfigMap.", "ConfigMap", klog.KRef(initData.Namespace, KMSConfigMapName))
 		}
 	}
 
 	return ret, nil
+}
+
+func getTopologyConstrainedPools(initData *ocsv1.StorageCluster) string {
+	type topologySegment struct {
+		DomainLabel string `json:"domainLabel"`
+		DomainValue string `json:"value"`
+	}
+	// TopologyConstrainedPool stores the pool name and a list of its associated topology domain values.
+	type topologyConstrainedPool struct {
+		PoolName       string            `json:"poolName"`
+		DomainSegments []topologySegment `json:"domainSegments"`
+	}
+
+	var topologyConstrainedPools []topologyConstrainedPool
+	for _, failureDomainValue := range initData.Status.FailureDomainValues {
+		failureDomain := initData.Status.FailureDomain
+		// Normally the label on the nodes is of the form kubernetes.io/hostname=<hostname>
+		// and the same is passed to ceph-csi through rook-ceph-opeartor-config cm.
+		// Hence, the ceph-non-resilient-rbd storageclass needs to have domainLabel set as hostname for topology constrained pools.
+		if failureDomain == "host" {
+			failureDomain = "hostname"
+		}
+		topologyConstrainedPools = append(topologyConstrainedPools, topologyConstrainedPool{
+			PoolName: generateNameForNonResilientCephBlockPool(initData, failureDomainValue),
+			DomainSegments: []topologySegment{
+				{
+					DomainLabel: failureDomain,
+					DomainValue: failureDomainValue,
+				},
+			},
+		})
+	}
+	// returning as string as parameters are of type map[string]string
+	topologyConstrainedPoolsStr, err := json.MarshalIndent(topologyConstrainedPools, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(topologyConstrainedPoolsStr)
 }

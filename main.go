@@ -23,26 +23,26 @@ import (
 	"os"
 	"runtime"
 
-	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	nbapis "github.com/noobaa/noobaa-operator/v5/pkg/apis"
 	openshiftConfigv1 "github.com/openshift/api/config/v1"
 	quotav1 "github.com/openshift/api/quota/v1"
 	routev1 "github.com/openshift/api/route/v1"
 	openshiftv1 "github.com/openshift/api/template/v1"
 	secv1client "github.com/openshift/client-go/security/clientset/versioned/typed/security/v1"
+	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	apiv2 "github.com/operator-framework/api/pkg/operators/v2"
 	"github.com/operator-framework/operator-lib/conditions"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	ocsv1 "github.com/red-hat-storage/ocs-operator/api/v1"
 	ocsv1alpha1 "github.com/red-hat-storage/ocs-operator/api/v1alpha1"
 	"github.com/red-hat-storage/ocs-operator/controllers/ocsinitialization"
-	"github.com/red-hat-storage/ocs-operator/controllers/persistentvolume"
-	"github.com/red-hat-storage/ocs-operator/controllers/storageclassclaim"
+	"github.com/red-hat-storage/ocs-operator/controllers/storageclassrequest"
 	"github.com/red-hat-storage/ocs-operator/controllers/storagecluster"
 	controllers "github.com/red-hat-storage/ocs-operator/controllers/storageconsumer"
 	"github.com/red-hat-storage/ocs-operator/controllers/util"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -54,7 +54,9 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/util/retry"
+	clusterv1alpha1 "open-cluster-management.io/api/cluster/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	apiclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	// +kubebuilder:scaffold:imports
@@ -74,6 +76,7 @@ func init() {
 	utilruntime.Must(storagev1.AddToScheme(scheme))
 	utilruntime.Must(nbapis.AddToScheme(scheme))
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
+	utilruntime.Must(batchv1.AddToScheme(scheme))
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(openshiftv1.AddToScheme(scheme))
 	utilruntime.Must(snapapi.AddToScheme(scheme))
@@ -82,6 +85,8 @@ func init() {
 	utilruntime.Must(routev1.AddToScheme(scheme))
 	utilruntime.Must(quotav1.AddToScheme(scheme))
 	utilruntime.Must(ocsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(clusterv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(operatorsv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -112,14 +117,25 @@ func main() {
 		setupLog.Info("running in development mode")
 	}
 
+	operatorNamespace, err := util.GetOperatorNamespace()
+	if err != nil {
+		setupLog.Error(err, "unable to get operator namespace")
+		os.Exit(1)
+	}
+
 	cfg := ctrl.GetConfigOrDie()
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		HealthProbeBindAddress: probeAddr,
-		Port:                   9443,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "ab76f4c9.openshift.io",
+		Scheme:                  scheme,
+		MetricsBindAddress:      metricsAddr,
+		HealthProbeBindAddress:  probeAddr,
+		Port:                    9443,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        "ab76f4c9.openshift.io",
+		LeaderElectionNamespace: operatorNamespace,
+		Namespace:               operatorNamespace,
+		NewCache: cache.BuilderWithOptions(cache.Options{
+			Namespace: operatorNamespace,
+		}),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -152,15 +168,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&persistentvolume.PersistentVolumeReconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("PersistentVolume"),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "PersistentVolume")
-		os.Exit(1)
-	}
-
 	if err = (&controllers.StorageConsumerReconciler{
 		Client: mgr.GetClient(),
 		Log:    ctrl.Log.WithName("controllers").WithName("StorageConsumer"),
@@ -170,17 +177,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	operatorNamespace, err := util.GetOperatorNamespace()
-	if err != nil {
-		setupLog.Error(err, "unable to get opeartor namespace")
-		os.Exit(1)
-	}
-	if err = (&storageclassclaim.StorageClassClaimReconciler{
+	if err = (&storageclassrequest.StorageClassRequestReconciler{
+		Cache:             mgr.GetCache(),
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		OperatorNamespace: operatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "StorageClassClaim")
+		setupLog.Error(err, "unable to create controller", "controller", "StorageClassRequest")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

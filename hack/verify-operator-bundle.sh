@@ -1,9 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
-source hack/common.sh
+source hack/ensure-operator-sdk.sh
 source hack/docker-common.sh
-source hack/operator-sdk-common.sh
 
-./"${OPERATOR_SDK}" bundle validate "$(dirname $OCS_FINAL_DIR)" -b "$IMAGE_BUILD_CMD" --verbose
+if [ "$FUSION" == "true" ]; then
+    ./"${OPERATOR_SDK}" bundle validate "$(dirname $ICS_FINAL_DIR)" --verbose
+else
+    ./"${OPERATOR_SDK}" bundle validate "$(dirname $OCS_FINAL_DIR)" --verbose
+fi

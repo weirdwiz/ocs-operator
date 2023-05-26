@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -36,22 +35,20 @@ var (
 	ocsCSVStr          = flag.String("ocs-csv-filepath", "", "path to ocs csv yaml file")
 	timestamp          = flag.String("timestamp", "false", "bool value to enable/disable timestamp changes in CSV")
 
-	rookContainerImage               = flag.String("rook-image", "", "rook operator container image")
-	cephContainerImage               = flag.String("ceph-image", "", "ceph daemon container image")
-	rookCsiCephImage                 = flag.String("rook-csi-ceph-image", "", "optional - defaults version supported by rook will be started if this is not set.")
-	rookCsiRegistrarImage            = flag.String("rook-csi-registrar-image", "", "optional - defaults version supported by rook will be started if this is not set.")
-	rookCsiResizerImage              = flag.String("rook-csi-resizer-image", "", "optional - defaults version supported by rook will be started if this is not set.")
-	rookCsiProvisionerImage          = flag.String("rook-csi-provisioner-image", "", "optional - defaults version supported by rook will be started if this is not set.")
-	rookCsiSnapshotterImage          = flag.String("rook-csi-snapshotter-image", "", "optional - defaults version supported by rook will be started if this is not set.")
-	rookCsiAttacherImage             = flag.String("rook-csi-attacher-image", "", "optional - defaults version supported by rook will be started if this is not set.")
-	noobaaCoreContainerImage         = flag.String("noobaa-core-image", "", "noobaa core container image")
-	noobaaDBContainerImage           = flag.String("noobaa-db-image", "", "db container image for noobaa")
-	ocsContainerImage                = flag.String("ocs-image", "", "ocs operator container image")
-	ocsMetricsExporterImage          = flag.String("ocs-metrics-exporter-image", "", "ocs metrics exporter container image")
-	ocsMustGatherImage               = flag.String("ocs-must-gather-image", "", "ocs-must-gather image")
-	volumeReplicationControllerImage = flag.String("vol-repl-image", "", "volume replication operator container image")
-	rookCsiAddonsImage               = flag.String("rook-csiaddons-image", "", "csi-addons container image")
-	rookCsiNFSImage                  = flag.String("rook-csi-nfs-image", "", "csi-nfs container image")
+	rookContainerImage       = flag.String("rook-image", "", "rook operator container image")
+	cephContainerImage       = flag.String("ceph-image", "", "ceph daemon container image")
+	rookCsiCephImage         = flag.String("rook-csi-ceph-image", "", "optional - defaults version supported by rook will be started if this is not set.")
+	rookCsiRegistrarImage    = flag.String("rook-csi-registrar-image", "", "optional - defaults version supported by rook will be started if this is not set.")
+	rookCsiResizerImage      = flag.String("rook-csi-resizer-image", "", "optional - defaults version supported by rook will be started if this is not set.")
+	rookCsiProvisionerImage  = flag.String("rook-csi-provisioner-image", "", "optional - defaults version supported by rook will be started if this is not set.")
+	rookCsiSnapshotterImage  = flag.String("rook-csi-snapshotter-image", "", "optional - defaults version supported by rook will be started if this is not set.")
+	rookCsiAttacherImage     = flag.String("rook-csi-attacher-image", "", "optional - defaults version supported by rook will be started if this is not set.")
+	noobaaCoreContainerImage = flag.String("noobaa-core-image", "", "noobaa core container image")
+	noobaaDBContainerImage   = flag.String("noobaa-db-image", "", "db container image for noobaa")
+	ocsContainerImage        = flag.String("ocs-image", "", "ocs operator container image")
+	ocsMetricsExporterImage  = flag.String("ocs-metrics-exporter-image", "", "ocs metrics exporter container image")
+	ocsMustGatherImage       = flag.String("ocs-must-gather-image", "", "ocs-must-gather image")
+	rookCsiAddonsImage       = flag.String("rook-csiaddons-image", "", "csi-addons container image")
 
 	inputCrdsDir      = flag.String("crds-directory", "", "The directory containing all the crds to be included in the registry bundle")
 	inputManifestsDir = flag.String("manifests-directory", "", "The directory containing the extra manifests to be included in the registry bundle")
@@ -82,10 +79,6 @@ type templateData struct {
 	RookOperatorCsvVersion string
 	OcsOperatorCsvVersion  string
 	OcsOperatorImage       string
-}
-
-func finalizedCsvFilename() string {
-	return "ocs-operator.clusterserviceversion.yaml"
 }
 
 func copyFile(src string, dst string) {
@@ -135,7 +128,7 @@ func unmarshalCSV(filePath string) *csvv1.ClusterServiceVersion {
 	templateStrategySpec := &csv.Spec.InstallStrategy.StrategySpec
 
 	// inject custom ENV VARS.
-	if strings.Contains(csv.Name, "ocs") {
+	if strings.Contains(csv.Name, "ocs") || strings.Contains(csv.Name, "ics") {
 		vars := []corev1.EnvVar{
 			{
 				Name:  "ROOK_CEPH_IMAGE",
@@ -233,20 +226,16 @@ func unmarshalCSV(filePath string) *csvv1.ClusterServiceVersion {
 				Value: "true",
 			},
 			{
-				Name:  "CSI_VOLUME_REPLICATION_IMAGE",
-				Value: *volumeReplicationControllerImage,
+				Name:  "ROOK_DISABLE_ADMISSION_CONTROLLER",
+				Value: "true",
 			},
 			{
 				Name:  "ROOK_CSIADDONS_IMAGE",
 				Value: *rookCsiAddonsImage,
 			},
 			{
-				Name:  "ROOK_CSI_NFS_IMAGE",
-				Value: *rookCsiNFSImage,
-			},
-			{
 				Name:  "CSI_ENABLE_METADATA",
-				Value: "true",
+				Value: "false",
 			},
 			{
 				Name: "CSI_CLUSTER_NAME",
@@ -256,6 +245,28 @@ func unmarshalCSV(filePath string) *csvv1.ClusterServiceVersion {
 							Name: "ocs-operator-config",
 						},
 						Key: "CSI_CLUSTER_NAME",
+					},
+				},
+			},
+			{
+				Name: "CSI_ENABLE_READ_AFFINITY",
+				ValueFrom: &corev1.EnvVarSource{
+					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "ocs-operator-config",
+						},
+						Key: "CSI_ENABLE_READ_AFFINITY",
+					},
+				},
+			},
+			{
+				Name: "CSI_CEPHFS_KERNEL_MOUNT_OPTIONS",
+				ValueFrom: &corev1.EnvVarSource{
+					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "ocs-operator-config",
+						},
+						Key: "CSI_CEPHFS_KERNEL_MOUNT_OPTIONS",
 					},
 				},
 			},
@@ -454,13 +465,6 @@ func generateUnifiedCSV() *csvv1.ClusterServiceVersion {
 
 	ocsCSV.Spec.CustomResourceDefinitions.Required = nil
 
-	ocsCSV.Spec.Icon = []csvv1.Icon{
-		{
-			Data:      "PHN2ZyBpZD0iTGF5ZXJfMSIgZGF0YS1uYW1lPSJMYXllciAxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxOTIgMTQ1Ij48ZGVmcz48c3R5bGU+LmNscy0xe2ZpbGw6I2UwMDt9PC9zdHlsZT48L2RlZnM+PHRpdGxlPlJlZEhhdC1Mb2dvLUhhdC1Db2xvcjwvdGl0bGU+PHBhdGggZD0iTTE1Ny43Nyw2Mi42MWExNCwxNCwwLDAsMSwuMzEsMy40MmMwLDE0Ljg4LTE4LjEsMTcuNDYtMzAuNjEsMTcuNDZDNzguODMsODMuNDksNDIuNTMsNTMuMjYsNDIuNTMsNDRhNi40Myw2LjQzLDAsMCwxLC4yMi0xLjk0bC0zLjY2LDkuMDZhMTguNDUsMTguNDUsMCwwLDAtMS41MSw3LjMzYzAsMTguMTEsNDEsNDUuNDgsODcuNzQsNDUuNDgsMjAuNjksMCwzNi40My03Ljc2LDM2LjQzLTIxLjc3LDAtMS4wOCwwLTEuOTQtMS43My0xMC4xM1oiLz48cGF0aCBjbGFzcz0iY2xzLTEiIGQ9Ik0xMjcuNDcsODMuNDljMTIuNTEsMCwzMC42MS0yLjU4LDMwLjYxLTE3LjQ2YTE0LDE0LDAsMCwwLS4zMS0zLjQybC03LjQ1LTMyLjM2Yy0xLjcyLTcuMTItMy4yMy0xMC4zNS0xNS43My0xNi42QzEyNC44OSw4LjY5LDEwMy43Ni41LDk3LjUxLjUsOTEuNjkuNSw5MCw4LDgzLjA2LDhjLTYuNjgsMC0xMS42NC01LjYtMTcuODktNS42LTYsMC05LjkxLDQuMDktMTIuOTMsMTIuNSwwLDAtOC40MSwyMy43Mi05LjQ5LDI3LjE2QTYuNDMsNi40MywwLDAsMCw0Mi41Myw0NGMwLDkuMjIsMzYuMywzOS40NSw4NC45NCwzOS40NU0xNjAsNzIuMDdjMS43Myw4LjE5LDEuNzMsOS4wNSwxLjczLDEwLjEzLDAsMTQtMTUuNzQsMjEuNzctMzYuNDMsMjEuNzdDNzguNTQsMTA0LDM3LjU4LDc2LjYsMzcuNTgsNTguNDlhMTguNDUsMTguNDUsMCwwLDEsMS41MS03LjMzQzIyLjI3LDUyLC41LDU1LC41LDc0LjIyYzAsMzEuNDgsNzQuNTksNzAuMjgsMTMzLjY1LDcwLjI4LDQ1LjI4LDAsNTYuNy0yMC40OCw1Ni43LTM2LjY1LDAtMTIuNzItMTEtMjcuMTYtMzAuODMtMzUuNzgiLz48L3N2Zz4=",
-			MediaType: "image/svg+xml",
-		},
-	}
-
 	ocsCSV.Annotations["operators.operatorframework.io/internal-objects"] = ""
 
 	templateStrategySpec := &ocsCSV.Spec.InstallStrategy.StrategySpec
@@ -468,18 +472,7 @@ func generateUnifiedCSV() *csvv1.ClusterServiceVersion {
 	// Merge CSVs into Unified CSV
 	for _, csv := range mergeCsvs {
 		if csv == noobaaCSV {
-			for _, definition := range csv.Spec.CustomResourceDefinitions.Owned {
-				// Add noobaas to Required
-				if definition.Name == "noobaas.noobaa.io" {
-					ocsCSV.Spec.CustomResourceDefinitions.Required = append(ocsCSV.Spec.CustomResourceDefinitions.Required, definition)
-				}
-			}
-			for _, definition := range csv.Spec.CustomResourceDefinitions.Required {
-				// Move ob and obc to Owned list instead to Required
-				if definition.Name == "objectbucketclaims.objectbucket.io" || definition.Name == "objectbuckets.objectbucket.io" {
-					ocsCSV.Spec.CustomResourceDefinitions.Owned = append(ocsCSV.Spec.CustomResourceDefinitions.Owned, definition)
-				}
-			}
+			continue
 		} else {
 			strategySpec := csv.Spec.InstallStrategy.StrategySpec
 
@@ -491,7 +484,14 @@ func generateUnifiedCSV() *csvv1.ClusterServiceVersion {
 			templateStrategySpec.ClusterPermissions = append(templateStrategySpec.ClusterPermissions, clusterPermissions...)
 			templateStrategySpec.Permissions = append(templateStrategySpec.Permissions, permissions...)
 
-			ocsCSV.Spec.CustomResourceDefinitions.Owned = append(ocsCSV.Spec.CustomResourceDefinitions.Owned, csv.Spec.CustomResourceDefinitions.Owned...)
+			for _, definition := range csv.Spec.CustomResourceDefinitions.Owned {
+				// do not add vr and vrc to csv, this will be owned by csi-addons now.
+				if !(definition.Name == "volumereplications.replication.storage.openshift.io" ||
+					definition.Name == "volumereplicationclasses.replication.storage.openshift.io") {
+					ocsCSV.Spec.CustomResourceDefinitions.Owned = append(ocsCSV.Spec.CustomResourceDefinitions.Owned, definition)
+				}
+			}
+
 		}
 	}
 	// whitelisting APIs
@@ -507,30 +507,9 @@ func generateUnifiedCSV() *csvv1.ClusterServiceVersion {
 		}
 	}
 
-	// Inject display name and description for our OCS crds
+	// Inject display name
 	for i, definition := range ocsCSV.Spec.CustomResourceDefinitions.Owned {
 		switch definition.Name {
-		case "storageclusters.ocs.openshift.io":
-			ocsCSV.Spec.CustomResourceDefinitions.Owned[i].DisplayName = "Storage Cluster"
-			ocsCSV.Spec.CustomResourceDefinitions.Owned[i].Description = "Storage Cluster represents a OpenShift Container Storage Cluster including Ceph Cluster, NooBaa and all the storage and compute resources required."
-			ocsCSV.Spec.CustomResourceDefinitions.Owned[i].Resources = []csvv1.APIResourceReference{
-				{
-					Name:    "cephclusters.ceph.rook.io",
-					Kind:    "CephCluster",
-					Version: "v1",
-				},
-				{
-					Name:    "noobaas.noobaa.io",
-					Kind:    "NooBaa",
-					Version: "v1alpha1",
-				},
-			}
-		case "ocsinitializations.ocs.openshift.io":
-			ocsCSV.Spec.CustomResourceDefinitions.Owned[i].DisplayName = "OCS Initialization"
-			ocsCSV.Spec.CustomResourceDefinitions.Owned[i].Description = "OCS Initialization represents the initial data to be created when the OCS operator is installed."
-		case "storageclusterinitializations.ocs.openshift.io":
-			ocsCSV.Spec.CustomResourceDefinitions.Owned[i].DisplayName = "StorageCluster Initialization"
-			ocsCSV.Spec.CustomResourceDefinitions.Owned[i].Description = "StorageCluster Initialization represents a set of tasks the OCS operator wants to implement for every StorageCluster it encounters."
 		case "cephblockpools.ceph.rook.io":
 			ocsCSV.Spec.CustomResourceDefinitions.Owned[i].DisplayName = "Block Pools"
 		}
@@ -569,95 +548,12 @@ func generateUnifiedCSV() *csvv1.ClusterServiceVersion {
 	}
 	v := version.OperatorVersion{Version: *semverVersion}
 	ocsCSV.Spec.Version = v
-	ocsCSV.Name = "ocs-operator.v" + *csvVersion
+	// base csv name is of the form ocs-operator.v0.0.0
+	tempCSVName := strings.Split(ocsCSV.Name, ".v")[0] + ".v"
+	ocsCSV.Name = tempCSVName + *csvVersion
 	if *replacesCsvVersion != "" {
-		ocsCSV.Spec.Replaces = "ocs-operator.v" + *replacesCsvVersion
+		ocsCSV.Spec.Replaces = tempCSVName + *replacesCsvVersion
 	}
-
-	// Set api maturity
-	ocsCSV.Spec.Maturity = "alpha"
-
-	// set Install Modes
-	ocsCSV.Spec.InstallModes = []csvv1.InstallMode{
-		{
-			Type:      csvv1.InstallModeTypeOwnNamespace,
-			Supported: true,
-		},
-		{
-			Type:      csvv1.InstallModeTypeSingleNamespace,
-			Supported: true,
-		},
-		{
-			Type:      csvv1.InstallModeTypeMultiNamespace,
-			Supported: false,
-		},
-		{
-			Type:      csvv1.InstallModeTypeAllNamespaces,
-			Supported: false,
-		},
-	}
-
-	// Set maintainers
-	ocsCSV.Spec.Maintainers = []csvv1.Maintainer{
-		{
-			Name:  "Red Hat Support",
-			Email: "ocs-support@redhat.com",
-		},
-	}
-
-	// Set links
-	ocsCSV.Spec.Links = []csvv1.AppLink{
-		{
-			Name: "Source Code",
-			URL:  "https://github.com/red-hat-storage/ocs-operator",
-		},
-	}
-
-	// Set Keywords
-	ocsCSV.Spec.Keywords = []string{
-		"storage",
-		"rook",
-		"ceph",
-		"block storage",
-		"shared filesystem",
-		"object storage",
-	}
-
-	// Set Provider
-	ocsCSV.Spec.Provider = csvv1.AppLink{
-		Name: "Red Hat",
-	}
-
-	// Set Description
-	ocsCSV.Spec.Description = `
-**Red Hat OpenShift Container Storage** deploys three operators.
-
-### OpenShift Container Storage operator
-
-The OpenShift Container Storage operator is the primary operator for OpenShift Container Storage. It serves to facilitate the other operators in OpenShift Container Storage by performing administrative tasks outside their scope as well as watching and configuring their CustomResources.
-
-### Rook
-
-[Rook][1] deploys and manages Ceph on OpenShift, which provides block and file storage.
-
-# Core Capabilities
-
-* **Self-managing service:** No matter which supported storage technologies you choose, OpenShift Container Storage ensures that resources can be deployed and managed automatically.
-
-* **Hyper-scale or hyper-converged:** With OpenShift Container Storage you can either build dedicated storage clusters or hyper-converged clusters where your apps run alongside storage.
-
-* **File, Block, and Object provided by OpenShift Container Storage:** OpenShift Container Storage integrates Ceph with multiple storage presentations including object storage (compatible with S3), block storage, and POSIX-compliant shared file system.
-
-* **Your data, protected:** OpenShift Container Storage efficiently distributes and replicates your data across your cluster to minimize the risk of data loss. With snapshots, cloning, and versioning, no more losing sleep over your data.
-
-* **Elastic storage in your datacenter:** Scale is now possible in your datacenter. Get started with a few terabytes, and easily scale up.
-
-* **Simplified data management:** Easily create hybrid and multi-cloud data storage for your workloads, using a single namespace.
-
-[1]: https://rook.io
-`
-
-	ocsCSV.Spec.DisplayName = "OpenShift Container Storage"
 
 	ocsCSV.Labels = make(map[string]string)
 
@@ -670,10 +566,6 @@ The OpenShift Container Storage operator is the primary operator for OpenShift C
 		ocsCSV.Annotations["olm.skipRange"] = *skipRange
 	}
 
-	// apiextensions/v1 is available only on Kubernetes 1.16+
-	// This ensures that we don't try to install on lower versions ok K8s
-	ocsCSV.Spec.MinKubeVersion = "1.16.0"
-
 	// Feature gating for Console. The array values are unique identifiers provided by the console.
 	// This can be used to enable/disable console support for any supported feature
 	// Example: "features.ocs.openshift.io/enabled": `["external", "foo1", "foo2", ...]`
@@ -682,7 +574,7 @@ The OpenShift Container Storage operator is the primary operator for OpenShift C
 	// To be used to disable UI components. This is used to track migration of features.
 	// Example: "features.ocs.openshift.io/disabled": `["external", "foo1", "foo2", ...]`
 	ocsCSV.Annotations["features.ocs.openshift.io/disabled"] = `["ss-list", "install-wizard", "block-pool", "mcg-resource", "odf-dashboard", "common", "storage-provider", "storage-provisioner", "dashboard-resources", "csv-actions", "inventory-item", "alert-actions"]`
-	// Used by UI to validate user uploaded metdata
+	// Used by UI to validate user uploaded metadata
 	// Metadata is used to connect to an external cluster
 	ocsCSV.Annotations["external.features.ocs.openshift.io/validation"] = `{"secrets":["rook-ceph-operator-creds", "rook-csi-rbd-node", "rook-csi-rbd-provisioner"], "configMaps": ["rook-ceph-mon-endpoints", "rook-ceph-mon"], "storageClasses": ["ceph-rbd"], "cephClusters": ["monitoring-endpoint"]}`
 	// Injecting the RHCS exporter script present in Rook CSV
@@ -694,14 +586,12 @@ The OpenShift Container Storage operator is the primary operator for OpenShift C
 		}
 		ocsCSV.Annotations["createdAt"] = time.Now().In(loc).Format("2006-01-02 15:04:05")
 	}
-	ocsCSV.Annotations["repository"] = "https://github.com/red-hat-storage/ocs-operator"
 	ocsCSV.Annotations["containerImage"] = "quay.io/ocs-dev/ocs-operator:" + ocsversion.Version
-	ocsCSV.Annotations["description"] = "Red Hat OpenShift Container Storage provides hyperconverged storage for applications within an OpenShift cluster."
-	ocsCSV.Annotations["support"] = "Red Hat"
 	ocsCSV.Annotations["capabilities"] = "Deep Insights"
 	ocsCSV.Annotations["categories"] = "Storage"
 	ocsCSV.Annotations["operators.operatorframework.io/operator-type"] = "non-standalone"
 	ocsCSV.Annotations["operatorframework.io/suggested-namespace"] = "openshift-storage"
+	ocsCSV.Annotations["operators.openshift.io/infrastructure-features"] = "[\"disconnected\"]"
 	// Make Storage cluster the initialization resource
 	ocsCSV.Annotations["operatorframework.io/initialization-resource"] = `
     {
@@ -723,7 +613,7 @@ The OpenShift Container Storage operator is the primary operator for OpenShift C
                             "storage": "10Gi"
                         }
                     },
-                    "storageClassName": "gp2"
+                    "storageClassName": "gp2-csi"
                 }
             },
             "storageDeviceSets": [
@@ -739,7 +629,7 @@ The OpenShift Container Storage operator is the primary operator for OpenShift C
                                     "storage": "1Ti"
                                 }
                             },
-                            "storageClassName": "gp2",
+                            "storageClassName": "gp2-csi",
                             "volumeMode": "Block"
                         }
                     },
@@ -776,7 +666,7 @@ The OpenShift Container Storage operator is the primary operator for OpenShift C
                             "storage": "10Gi"
                         }
                     },
-                    "storageClassName": "gp2"
+                    "storageClassName": "gp2-csi"
                 }
             },
             "storageDeviceSets": [
@@ -792,7 +682,7 @@ The OpenShift Container Storage operator is the primary operator for OpenShift C
                                     "storage": "1Ti"
                                 }
                             },
-                            "storageClassName": "gp2",
+                            "storageClassName": "gp2-csi",
                             "volumeMode": "Block"
                         }
                     },
@@ -812,12 +702,14 @@ The OpenShift Container Storage operator is the primary operator for OpenShift C
 	if err != nil {
 		panic(err)
 	}
-	err = ioutil.WriteFile(filepath.Join(*outputDir, finalizedCsvFilename()), []byte(writer.String()), 0644)
+
+	finalizedCsvFilename := strings.Split(tempCSVName, ".")[0] + ".clusterserviceversion.yaml"
+	err = os.WriteFile(filepath.Join(*outputDir, finalizedCsvFilename), []byte(writer.String()), 0644)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("CSV written to %s\n", filepath.Join(*outputDir, finalizedCsvFilename()))
+	fmt.Printf("CSV written to %s\n", filepath.Join(*outputDir, finalizedCsvFilename))
 	return ocsCSV
 }
 
@@ -873,22 +765,10 @@ func injectCSVRelatedImages(r *unstructured.Unstructured) error {
 			"image": *cephContainerImage,
 		})
 	}
-	if *volumeReplicationControllerImage != "" {
-		relatedImages = append(relatedImages, map[string]interface{}{
-			"name":  "volume-replication-operator",
-			"image": *volumeReplicationControllerImage,
-		})
-	}
 	if *rookCsiAddonsImage != "" {
 		relatedImages = append(relatedImages, map[string]interface{}{
 			"name":  "csiaddons-sidecar",
 			"image": *rookCsiAddonsImage,
-		})
-	}
-	if *rookCsiNFSImage != "" {
-		relatedImages = append(relatedImages, map[string]interface{}{
-			"name":  "rook-csi-nfs",
-			"image": *rookCsiNFSImage,
 		})
 	}
 	if *ocsMustGatherImage != "" {
@@ -912,7 +792,7 @@ func copyCrds(ocsCSV *csvv1.ClusterServiceVersion) {
 
 	for _, dir := range crdDirs {
 		crdDir := filepath.Join(*inputCrdsDir, dir)
-		files, err := ioutil.ReadDir(crdDir)
+		files, err := os.ReadDir(crdDir)
 		if err != nil {
 			panic(err)
 		}
@@ -927,7 +807,7 @@ func copyCrds(ocsCSV *csvv1.ClusterServiceVersion) {
 	}
 
 	for _, crdFile := range crdFiles {
-		crdBytes, err := ioutil.ReadFile(crdFile)
+		crdBytes, err := os.ReadFile(crdFile)
 		if err != nil {
 			panic(err)
 		}
@@ -961,7 +841,7 @@ func copyCrds(ocsCSV *csvv1.ClusterServiceVersion) {
 			if err != nil {
 				panic(err)
 			}
-			err = ioutil.WriteFile(outputFile, []byte(writer.String()), 0644)
+			err = os.WriteFile(outputFile, []byte(writer.String()), 0644)
 			if err != nil {
 				panic(err)
 			}
@@ -971,7 +851,7 @@ func copyCrds(ocsCSV *csvv1.ClusterServiceVersion) {
 }
 
 func copyManifests() {
-	manifests, err := ioutil.ReadDir(*inputManifestsDir)
+	manifests, err := os.ReadDir(*inputManifestsDir)
 	if err != nil {
 		panic(err)
 	}
@@ -990,7 +870,8 @@ func copyManifests() {
 
 func getMetricsExporterDeployment() appsv1.DeploymentSpec {
 	replica := int32(1)
-	privileged := true
+	privileged := false
+	noRoot := true
 	deployment := appsv1.DeploymentSpec{
 		Replicas: &replica,
 		Selector: &metav1.LabelSelector{
@@ -1012,17 +893,46 @@ func getMetricsExporterDeployment() appsv1.DeploymentSpec {
 					{
 						Name: "ocs-metrics-exporter",
 						SecurityContext: &corev1.SecurityContext{
-							Privileged: &privileged,
+							Privileged:   &privileged,
+							RunAsNonRoot: &noRoot,
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "ceph-config",
+								MountPath: "/etc/ceph",
+							},
 						},
 						Image:   *ocsMetricsExporterImage,
 						Command: []string{"/usr/local/bin/metrics-exporter"},
-						Args:    []string{"--namespaces=openshift-storage"},
+						Args:    []string{"--namespaces=$(WATCH_NAMESPACE)"},
+						Env: []corev1.EnvVar{
+							{
+								Name: "WATCH_NAMESPACE",
+								ValueFrom: &corev1.EnvVarSource{
+									FieldRef: &corev1.ObjectFieldSelector{
+										FieldPath: "metadata.namespace",
+									},
+								},
+							},
+						},
 						Ports: []corev1.ContainerPort{
 							{
 								ContainerPort: 8080,
 							},
 							{
 								ContainerPort: 8081,
+							},
+						},
+					},
+				},
+				Volumes: []corev1.Volume{
+					{
+						Name: "ceph-config",
+						VolumeSource: corev1.VolumeSource{
+							ConfigMap: &corev1.ConfigMapVolumeSource{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: "ocs-metrics-exporter-ceph-conf",
+								},
 							},
 						},
 					},

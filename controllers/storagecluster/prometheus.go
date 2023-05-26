@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
 	"github.com/imdario/mergo"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	ocsv1 "github.com/red-hat-storage/ocs-operator/api/v1"
+	"github.com/red-hat-storage/ocs-operator/controllers/util"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -21,7 +21,6 @@ const (
 	internalPrometheusRuleFilepath = "/ocs-prometheus-rules/prometheus-ocs-rules.yaml"
 	externalPrometheusRuleFilepath = "/ocs-prometheus-rules/prometheus-ocs-rules-external.yaml"
 	ruleName                       = "ocs-prometheus-rules"
-	ruleNamespace                  = "openshift-storage"
 )
 
 // enablePrometheusRules is a wrapper around CreateOrUpdatePrometheusRule()
@@ -51,7 +50,7 @@ func getPrometheusRules(isExternal bool) (*monitoringv1.PrometheusRule, error) {
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ruleName,
-			Namespace: ruleNamespace,
+			Namespace: os.Getenv(util.OperatorNamespaceEnvVar),
 		},
 	}
 	var err error
@@ -75,7 +74,7 @@ func getPrometheusRuleSpecFrom(filePath string) (*monitoringv1.PrometheusRuleSpe
 	if err := CheckFileExists(filePath); err != nil {
 		return nil, err
 	}
-	fileContent, err := ioutil.ReadFile(filepath.Clean(filePath))
+	fileContent, err := os.ReadFile(filepath.Clean(filePath))
 	if err != nil {
 		return nil, fmt.Errorf("'%s' not readable", filePath)
 	}
@@ -110,6 +109,12 @@ func (r *StorageClusterReconciler) CreateOrUpdatePrometheusRules(rule *monitorin
 				return fmt.Errorf("failed while fetching PrometheusRule: %v", err)
 			}
 			oldRule.Spec = rule.Spec
+
+			err = mergo.Merge(&oldRule.Labels, rule.Labels, mergo.WithOverride)
+			if err != nil {
+				return err
+			}
+
 			err := r.Client.Update(context.TODO(), oldRule)
 			if err != nil {
 				return fmt.Errorf("failed while updating PrometheusRule: %v", err)
