@@ -1,11 +1,12 @@
+---
 name: Verify latest deployment prometheus yaml
 on:
   push:
     paths:
-      - 'metrics/*'
+      - 'metrics/**'
   pull_request:
     paths:
-      - 'metrics/*'
+      - 'metrics/**'
 
 jobs:
   verify-deployment-prom:
