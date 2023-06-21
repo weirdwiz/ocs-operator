@@ -97,21 +97,45 @@ func getAllObjectStores(lister cephv1listers.CephObjectStoreLister, namespaces [
 func (c *CephObjectStoreCollector) collectObjectStoreHealth(cephObjectStores []*cephv1.CephObjectStore, ch chan<- prometheus.Metric) {
 	for _, cephObjectStore := range cephObjectStores {
 		switch cephObjectStore.Status.Phase {
-		case cephv1.ConditionConnected:
+		case cephv1.ConditionConnecting:
 			ch <- prometheus.MustNewConstMetric(c.RGWHealthStatus,
 				prometheus.GaugeValue, 0,
 				cephObjectStore.Name,
 				cephObjectStore.Namespace,
 				cephObjectStore.Status.Info["endpoint"])
-		case cephv1.ConditionProgressing:
+		case cephv1.ConditionConnected:
 			ch <- prometheus.MustNewConstMetric(c.RGWHealthStatus,
 				prometheus.GaugeValue, 1,
 				cephObjectStore.Name,
 				cephObjectStore.Namespace,
 				cephObjectStore.Status.Info["endpoint"])
-		case cephv1.ConditionFailure:
+		case cephv1.ConditionProgressing:
 			ch <- prometheus.MustNewConstMetric(c.RGWHealthStatus,
 				prometheus.GaugeValue, 2,
+				cephObjectStore.Name,
+				cephObjectStore.Namespace,
+				cephObjectStore.Status.Info["endpoint"])
+		case cephv1.ConditionReady:
+			ch <- prometheus.MustNewConstMetric(c.RGWHealthStatus,
+				prometheus.GaugeValue, 3,
+				cephObjectStore.Name,
+				cephObjectStore.Namespace,
+				cephObjectStore.Status.Info["endpoint"])
+		case cephv1.ConditionFailure:
+			ch <- prometheus.MustNewConstMetric(c.RGWHealthStatus,
+				prometheus.GaugeValue, 4,
+				cephObjectStore.Name,
+				cephObjectStore.Namespace,
+				cephObjectStore.Status.Info["endpoint"])
+		case cephv1.ConditionDeleting:
+			ch <- prometheus.MustNewConstMetric(c.RGWHealthStatus,
+				prometheus.GaugeValue, 5,
+				cephObjectStore.Name,
+				cephObjectStore.Namespace,
+				cephObjectStore.Status.Info["endpoint"])
+		case cephv1.ConditionDeletionIsBlocked:
+			ch <- prometheus.MustNewConstMetric(c.RGWHealthStatus,
+				prometheus.GaugeValue, 6,
 				cephObjectStore.Name,
 				cephObjectStore.Namespace,
 				cephObjectStore.Status.Info["endpoint"])
