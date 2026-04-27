@@ -110,20 +110,26 @@ func (c *CephFSSubvolumeCountCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+func (c *CephFSSubvolumeCountCollector) reconnect() {
+	if c.conn != nil {
+		c.conn.Reconnect()
+	}
+}
+
 func (c *CephFSSubvolumeCountCollector) runScan() bool {
 	start := time.Now()
 
 	fsa, err := c.newFSAdmin()
 	if err != nil {
 		klog.Errorf("cephfs scan: failed to get ceph connection: %v", err)
-		c.conn.Reconnect()
+		c.reconnect()
 		return false
 	}
 
 	volumes, err := fsa.ListVolumes()
 	if err != nil {
 		klog.Errorf("cephfs scan: failed to list volumes: %v", err)
-		c.conn.Reconnect()
+		c.reconnect()
 		return false
 	}
 
@@ -183,7 +189,7 @@ func (c *CephFSSubvolumeCountCollector) runScan() bool {
 
 	if len(volumes) > 0 && !anyVolumeSucceeded {
 		klog.Error("cephfs scan: failed for all volumes, reconnecting")
-		c.conn.Reconnect()
+		c.reconnect()
 		return false
 	}
 
@@ -205,6 +211,9 @@ func (c *CephFSSubvolumeCountCollector) runScan() bool {
 
 func buildSubVolumeGroupToConsumerMap(client rookclient.Interface, ns string) map[string]string {
 	groupToConsumer := make(map[string]string)
+	if client == nil {
+		return groupToConsumer
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

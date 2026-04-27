@@ -2,6 +2,7 @@ package collectors
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -124,23 +125,38 @@ func TestCephFSSubvolumeCountCollectorCollect(t *testing.T) {
 			t.Fatalf("expected 7 metrics, got %d", len(metrics))
 		}
 
-		countsByConsumer := make(map[string]float64)
+		subvolCounts := make(map[string]float64)
+		snapCounts := make(map[string]float64)
+		pvCount := 0
 		for _, m := range metrics {
 			var d dto.Metric
 			if err := m.Write(&d); err != nil {
 				t.Fatal(err)
 			}
+			desc := m.Desc().String()
+			consumer := ""
 			for _, lp := range d.Label {
-				if lp.GetName() == "consumer_name" && d.Gauge != nil {
-					countsByConsumer[lp.GetValue()] = d.Gauge.GetValue()
+				if lp.GetName() == "consumer_name" {
+					consumer = lp.GetValue()
 				}
 			}
+			switch {
+			case strings.Contains(desc, "subvolume_count"):
+				subvolCounts[consumer] = d.Gauge.GetValue()
+			case strings.Contains(desc, "snapshot_content_count"):
+				snapCounts[consumer] = d.Gauge.GetValue()
+			case strings.Contains(desc, "pv_metadata"):
+				pvCount++
+			}
 		}
-		if countsByConsumer["consumer-a"] != 2 {
-			t.Errorf("consumer-a subvolume_count = %v, want 2", countsByConsumer["consumer-a"])
+		if subvolCounts["consumer-a"] != 2 {
+			t.Errorf("consumer-a subvolume_count = %v, want 2", subvolCounts["consumer-a"])
 		}
-		if countsByConsumer["consumer-b"] != 3 {
-			t.Errorf("consumer-b subvolume_count = %v, want 3", countsByConsumer["consumer-b"])
+		if subvolCounts["consumer-b"] != 3 {
+			t.Errorf("consumer-b subvolume_count = %v, want 3", subvolCounts["consumer-b"])
+		}
+		if pvCount != 3 {
+			t.Errorf("expected 3 pvMetadata metrics, got %d", pvCount)
 		}
 	})
 }

@@ -111,11 +111,7 @@ jobs:
             metrics:
               - 'metrics/**'
 
-      - name: Run PromQL validation tests
-        if: steps.filter.outputs.metrics == 'true'
-        run: make metrics-promql-test
-
-      - name: Run containerized metrics tests
+      - name: Run metrics exporter tests
         if: steps.filter.outputs.metrics == 'true'
         run: make containerized-metrics-test
 
