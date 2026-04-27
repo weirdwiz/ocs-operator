@@ -88,6 +88,37 @@ jobs:
       - name: Verify ocs bundle changes
         run: make verify-operator-bundle
 
+  metrics-test:
+    name: metrics exporter tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            metrics:
+              - 'metrics/**'
+
+      - name: Run PromQL validation tests
+        if: steps.filter.outputs.metrics == 'true'
+        run: make metrics-promql-test
+
+      - name: Run containerized metrics tests
+        if: steps.filter.outputs.metrics == 'true'
+        run: make containerized-metrics-test
+
   code-spell:
     name: verify code spellings
     runs-on: ubuntu-latest
