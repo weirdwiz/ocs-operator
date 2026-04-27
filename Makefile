@@ -28,7 +28,8 @@ METRICS_DEVEL_IMAGE = ocs-metrics-exporter:devel
 	unit-test \
 	deps-update \
 	containerized-metrics-build \
-	containerized-metrics-test
+	containerized-metrics-test \
+	metrics-promql-test
 
 deps-update:
 	set -e
@@ -74,10 +75,14 @@ containerized-metrics-build: .metrics-devel-container-id
 	$(CONTAINER_CMD) run --rm -v $(CURDIR):/workspace $(METRICS_DEVEL_IMAGE) \
 		go build -mod=vendor ./metrics/...
 
-# Run metrics exporter tests inside a container
+# Run metrics exporter tests inside a container (CGO tests requiring ceph headers)
 containerized-metrics-test: .metrics-devel-container-id
 	$(CONTAINER_CMD) run --rm -v $(CURDIR):/workspace $(METRICS_DEVEL_IMAGE) \
-		go test -mod=vendor -v -cover ./metrics/...
+		go test -mod=vendor -v -cover ./metrics/internal/collectors/... ./metrics/internal/ceph/...
+
+# Run PromQL validation tests (pure Go, no container needed)
+metrics-promql-test:
+	cd metrics && go test -v -count=1 ./internal/rules/...
 
 gen-protobuf:
 	@echo "Generating protobuf files for gRPC services"
