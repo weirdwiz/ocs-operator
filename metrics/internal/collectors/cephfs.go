@@ -37,10 +37,11 @@ type CephFSSubvolumeCountCollector struct {
 	subvolumeCount       *prometheus.Desc
 	snapshotContentCount *prometheus.Desc
 	cache                atomic.Pointer[cephfsCacheSnapshot]
+	newFSAdmin           func() (fsAdmin, error)
 }
 
 func NewCephFSSubvolumeCountCollector(conn *cephconn.Conn, rookClient rookclient.Interface, ns string, scanInterval time.Duration) *CephFSSubvolumeCountCollector {
-	return &CephFSSubvolumeCountCollector{
+	c := &CephFSSubvolumeCountCollector{
 		conn:         conn,
 		rookClient:   rookClient,
 		namespace:    ns,
@@ -62,6 +63,14 @@ func NewCephFSSubvolumeCountCollector(conn *cephconn.Conn, rookClient rookclient
 			[]string{"consumer_name"}, nil,
 		),
 	}
+	c.newFSAdmin = func() (fsAdmin, error) {
+		radosConn, err := c.conn.Get()
+		if err != nil {
+			return nil, err
+		}
+		return admin.NewFromConn(radosConn), nil
+	}
+	return c
 }
 
 func (c *CephFSSubvolumeCountCollector) Run(stopCh <-chan struct{}) {
@@ -101,22 +110,26 @@ func (c *CephFSSubvolumeCountCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+func (c *CephFSSubvolumeCountCollector) reconnect() {
+	if c.conn != nil {
+		c.conn.Reconnect()
+	}
+}
+
 func (c *CephFSSubvolumeCountCollector) runScan() bool {
 	start := time.Now()
 
-	conn, err := c.conn.Get()
+	fsa, err := c.newFSAdmin()
 	if err != nil {
 		klog.Errorf("cephfs scan: failed to get ceph connection: %v", err)
-		c.conn.Reconnect()
+		c.reconnect()
 		return false
 	}
-
-	fsa := admin.NewFromConn(conn)
 
 	volumes, err := fsa.ListVolumes()
 	if err != nil {
 		klog.Errorf("cephfs scan: failed to list volumes: %v", err)
-		c.conn.Reconnect()
+		c.reconnect()
 		return false
 	}
 
@@ -176,7 +189,7 @@ func (c *CephFSSubvolumeCountCollector) runScan() bool {
 
 	if len(volumes) > 0 && !anyVolumeSucceeded {
 		klog.Error("cephfs scan: failed for all volumes, reconnecting")
-		c.conn.Reconnect()
+		c.reconnect()
 		return false
 	}
 
@@ -198,6 +211,9 @@ func (c *CephFSSubvolumeCountCollector) runScan() bool {
 
 func buildSubVolumeGroupToConsumerMap(client rookclient.Interface, ns string) map[string]string {
 	groupToConsumer := make(map[string]string)
+	if client == nil {
+		return groupToConsumer
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

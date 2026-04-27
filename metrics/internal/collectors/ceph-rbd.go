@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ceph/go-ceph/rados"
 	"github.com/ceph/go-ceph/rbd"
 	"github.com/prometheus/client_golang/prometheus"
 	cephconn "github.com/red-hat-storage/ocs-operator/metrics/v4/internal/ceph"
@@ -75,6 +74,9 @@ type CephRBDCollector struct {
 	namespace    string
 	scanInterval time.Duration
 
+	rbdConn rbdConnector
+	rbdOps  rbdPoolOps
+
 	pvMetadata    *prometheus.Desc
 	childrenCount *prometheus.Desc
 	mirrorState   *prometheus.Desc
@@ -89,6 +91,7 @@ func NewCephRBDCollector(conn *cephconn.Conn, rookClient rookclient.Interface, d
 		dynClient:    dynClient,
 		namespace:    ns,
 		scanInterval: scanInterval,
+		rbdOps:       &realRbdPoolOps{},
 		pvMetadata: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "rbd", "pv_metadata"),
 			"Attributes of Ceph RBD based Persistent Volume",
@@ -180,14 +183,25 @@ func (c *CephRBDCollector) runScan() bool {
 	return true
 }
 
-func (c *CephRBDCollector) enumeratePools() (map[poolNsKey]*rbdPoolData, []rbdImageBatch, error) {
+func (c *CephRBDCollector) getConnector() (rbdConnector, error) {
+	if c.rbdConn != nil {
+		return c.rbdConn, nil
+	}
 	conn, err := c.conn.Get()
+	if err != nil {
+		return nil, err
+	}
+	return &radosConnWrapper{conn: conn}, nil
+}
+
+func (c *CephRBDCollector) enumeratePools() (map[poolNsKey]*rbdPoolData, []rbdImageBatch, error) {
+	connector, err := c.getConnector()
 	if err != nil {
 		c.conn.Reconnect()
 		return nil, nil, fmt.Errorf("failed to get ceph connection: %w", err)
 	}
 
-	pools, err := conn.ListPools()
+	pools, err := connector.ListPools()
 	if err != nil {
 		c.conn.Reconnect()
 		return nil, nil, fmt.Errorf("failed to list pools: %w", err)
@@ -199,7 +213,7 @@ func (c *CephRBDCollector) enumeratePools() (map[poolNsKey]*rbdPoolData, []rbdIm
 
 	anyPoolSucceeded := false
 	for _, pool := range pools {
-		poolWork, err := c.scanPool(conn, pool, nsToConsumer, newPools)
+		poolWork, err := c.scanPool(connector, pool, nsToConsumer, newPools)
 		if err != nil {
 			klog.Errorf("rbd scan: %v", err)
 			continue
@@ -216,15 +230,13 @@ func (c *CephRBDCollector) enumeratePools() (map[poolNsKey]*rbdPoolData, []rbdIm
 	return newPools, work, nil
 }
 
-// scanPool enumerates images and mirror state for a single pool and its rados namespaces.
-// The IOContext is created and destroyed within this function, preventing leaks.
 func (c *CephRBDCollector) scanPool(
-	conn *rados.Conn,
+	connector rbdConnector,
 	pool string,
 	nsToConsumer map[string]string,
 	newPools map[poolNsKey]*rbdPoolData,
 ) ([]rbdImageBatch, error) {
-	ioctx, err := conn.OpenIOContext(pool)
+	ioctx, err := connector.OpenIOContext(pool)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open IO context for pool %s: %w", pool, err)
 	}
@@ -238,7 +250,7 @@ func (c *CephRBDCollector) scanPool(
 		work = append(work, chunks...)
 	}
 
-	namespaces, err := rbd.NamespaceList(ioctx)
+	namespaces, err := c.rbdOps.NamespaceList(ioctx)
 	if err != nil {
 		klog.Errorf("rbd scan: failed to list namespaces for pool %s: %v", pool, err)
 		return work, nil
@@ -288,11 +300,11 @@ func (c *CephRBDCollector) processWork(newPools map[poolNsKey]*rbdPoolData, work
 }
 
 func (c *CephRBDCollector) enumerateNamespace(
-	ioctx *rados.IOContext,
+	ioctx rbdIOContext,
 	pool, radosNamespace string,
 	nsToConsumer map[string]string,
 ) (*rbdPoolData, []rbdImageBatch) {
-	images, err := rbd.GetImageNames(ioctx)
+	images, err := c.rbdOps.GetImageNames(ioctx)
 	if err != nil {
 		klog.Errorf("rbd scan: failed to list images for %s/%q: %v", pool, radosNamespace, err)
 		return nil, nil
@@ -301,17 +313,15 @@ func (c *CephRBDCollector) enumerateNamespace(
 	poolData := &rbdPoolData{
 		consumerName: nsToConsumer[radosNamespace],
 		images:       make(map[string]rbdImageData, len(images)),
-		mirrors:      collectMirrorData(ioctx, pool, radosNamespace),
+		mirrors:      c.collectMirrorData(ioctx, pool, radosNamespace),
 	}
 
 	chunks := chunkImages(pool, radosNamespace, images)
 	return poolData, chunks
 }
 
-// collectMirrorData gathers per-image mirror state for a pool/namespace.
-// Returns nil if mirroring is disabled or on any error.
-func collectMirrorData(ioctx *rados.IOContext, pool, radosNamespace string) []rbdMirrorData {
-	mirrorMode, err := rbd.GetMirrorMode(ioctx)
+func (c *CephRBDCollector) collectMirrorData(ioctx rbdIOContext, pool, radosNamespace string) []rbdMirrorData {
+	mirrorMode, err := c.rbdOps.GetMirrorMode(ioctx)
 	if err != nil {
 		klog.Warningf("rbd scan: failed to get mirror mode for %s/%q: %v", pool, radosNamespace, err)
 		return nil
@@ -320,13 +330,17 @@ func collectMirrorData(ioctx *rados.IOContext, pool, radosNamespace string) []rb
 		return nil
 	}
 
-	peerMap, err := cephconn.BuildMirrorPeerMap(ioctx)
+	peers, err := c.rbdOps.ListMirrorPeerSite(ioctx)
 	if err != nil {
 		klog.Errorf("rbd scan: failed to build mirror peer map for %s: %v", pool, err)
 		return nil
 	}
+	peerMap := make(map[string]string, len(peers))
+	for _, peer := range peers {
+		peerMap[peer.MirrorUUID] = peer.SiteName
+	}
 
-	statuses, err := rbd.MirrorImageGlobalStatusList(ioctx, "", 0)
+	statuses, err := c.rbdOps.MirrorImageGlobalStatusList(ioctx)
 	if err != nil {
 		klog.Errorf("rbd scan: failed to list mirror status for %s/%q: %v", pool, radosNamespace, err)
 		return nil
@@ -364,8 +378,8 @@ func chunkImages(pool, radosNamespace string, images []string) []rbdImageBatch {
 	return chunks
 }
 
-func processImage(ioctx *rados.IOContext, name string) (rbdImageData, bool) {
-	img, err := rbd.OpenImageReadOnly(ioctx, name, rbd.NoSnapshot)
+func (c *CephRBDCollector) processImage(ioctx rbdIOContext, name string) (rbdImageData, bool) {
+	img, err := c.rbdOps.OpenImageReadOnly(ioctx, name)
 	if err != nil {
 		klog.V(4).Infof("rbd worker: failed to open image %s: %v", name, err)
 		return rbdImageData{}, false
@@ -397,16 +411,25 @@ func processImage(ioctx *rados.IOContext, name string) (rbdImageData, bool) {
 }
 
 func (c *CephRBDCollector) processImageChunk(w rbdImageBatch) map[string]rbdImageData {
-	ioctx, err := c.conn.IOContext(w.pool, w.radosNamespace)
+	connector, err := c.getConnector()
+	if err != nil {
+		klog.Errorf("rbd worker: failed to get ceph connection for %s/%q: %v", w.pool, w.radosNamespace, err)
+		return nil
+	}
+	ioctx, err := connector.OpenIOContext(w.pool)
 	if err != nil {
 		klog.Errorf("rbd worker: failed to get IO context for %s/%q: %v", w.pool, w.radosNamespace, err)
 		return nil
 	}
 	defer ioctx.Destroy()
 
+	if w.radosNamespace != "" {
+		ioctx.SetNamespace(w.radosNamespace)
+	}
+
 	results := make(map[string]rbdImageData, len(w.images))
 	for _, name := range w.images {
-		if data, ok := processImage(ioctx, name); ok {
+		if data, ok := c.processImage(ioctx, name); ok {
 			results[name] = data
 		}
 	}
@@ -494,16 +517,14 @@ func (c *CephRBDCollector) scanBlocklist() map[string]string {
 	return blockedNodes
 }
 
-// fetchBlocklistIPs queries the Ceph OSD blocklist and returns unique
-// blocklisted IP addresses.
 func (c *CephRBDCollector) fetchBlocklistIPs() ([]string, error) {
-	conn, err := c.conn.Get()
+	connector, err := c.getConnector()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get ceph connection: %w", err)
 	}
 
 	cmd := []byte(`{"prefix": "osd blocklist ls", "format": "json"}`)
-	buf, _, err := conn.MonCommand(cmd)
+	buf, _, err := connector.MonCommand(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("MonCommand osd blocklist ls: %w", err)
 	}

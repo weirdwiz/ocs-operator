@@ -74,7 +74,7 @@ containerized-metrics-build: .metrics-devel-container-id
 	$(CONTAINER_CMD) run --rm -v $(CURDIR):/workspace $(METRICS_DEVEL_IMAGE) \
 		go build -mod=vendor ./metrics/...
 
-# Run metrics exporter tests inside a container
+# Run metrics exporter tests inside a container (provides ceph C headers for go-ceph CGO)
 containerized-metrics-test: .metrics-devel-container-id
 	$(CONTAINER_CMD) run --rm -v $(CURDIR):/workspace $(METRICS_DEVEL_IMAGE) \
 		go test -mod=vendor -v -cover ./metrics/...
