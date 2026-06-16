@@ -487,6 +487,22 @@ func deployMetricsExporter(ctx context.Context, r *StorageClusterReconciler, ins
 				},
 			},
 		}
+
+		// Add multus related annotations, if multus provider is set
+		if util.IsMultus(instance.Spec.Network) {
+			net, err := getMultusPublicNetwork(instance)
+			if err != nil {
+				return err
+			}
+			if net != "" {
+				if currentDep.Spec.Template.Annotations == nil {
+					currentDep.Spec.Template.Annotations = make(map[string]string)
+				}
+				currentDep.Spec.Template.Annotations["k8s.v1.cni.cncf.io/networks"] = net
+				currentDep.Spec.Template.Spec.HostNetwork = false
+			}
+		}
+
 		return nil
 	}); err != nil {
 		return err
